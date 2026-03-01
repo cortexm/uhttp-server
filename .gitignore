@@ -1,0 +1,10 @@
+*.egg-info
+__pycache__
+*.pyc
+.*
+!.gitignore
+!.github
+!.mpyproject
+*.pem
+*.md
+!README*.md

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uhttp-server"
+version = "2.1.0"
+description = "Micro HTTP server for Python and MicroPython"
+authors = [
+    {name = "Pavel Revak", email = "pavelrevak@gmail.com"}
+]
+license = {text = "MIT"}
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: MicroPython",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/pavelrevak/uhttp"
+Repository = "https://github.com/pavelrevak/uhttp"
+
+[tool.setuptools.packages.find]
+include = ["uhttp*"]
