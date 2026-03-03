@@ -91,6 +91,10 @@ def requires_device(cls):
     return cls
 
 
+# Minimum free RAM for server tests (server.py is ~44KB)
+MIN_RAM_FOR_SERVER = 200000
+
+
 class MpyServerTestCase(unittest.TestCase):
     """Base class for MicroPython server tests"""
 
@@ -108,6 +112,12 @@ class MpyServerTestCase(unittest.TestCase):
         cls.mpy = mpytool.Mpy(cls.conn)
         cls.mpy.stop()
 
+        # Check RAM before uploading large server module
+        free_mem = cls.get_free_memory()
+        if free_mem < MIN_RAM_FOR_SERVER:
+            raise unittest.SkipTest(
+                f"Not enough RAM for server: {free_mem} < {MIN_RAM_FOR_SERVER}")
+
         # Upload server module once
         if not cls._server_uploaded:
             cls._upload_server()
@@ -118,6 +128,13 @@ class MpyServerTestCase(unittest.TestCase):
 
         # Start server on ESP32
         cls._start_server()
+
+    @classmethod
+    def get_free_memory(cls):
+        """Get free memory on device"""
+        result = cls.mpy.comm.exec_raw_paste(
+            "import gc; gc.collect(); print(gc.mem_free())", timeout=5)
+        return int(result.strip())
 
     @classmethod
     def tearDownClass(cls):

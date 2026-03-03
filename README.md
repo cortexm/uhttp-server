@@ -513,12 +513,10 @@ server = uhttp.server.HttpServer(address='::1', port=80)
 ../.venv/bin/python -m unittest discover -v tests/
 ```
 
-For running tests from meta-repo, see [uhttp README](https://github.com/pavelrevak/uhttp#testing).
-
 ### MicroPython integration tests
 
 Tests run HTTP server on real ESP32 hardware, with test client on PC.
-Requires [mpytool](https://github.com/pavelrevak/mpytool) and `uhttp-client`.
+Requires [mpytool](https://github.com/cortexm/mpytool) and `uhttp-client`.
 
 **Configuration:**
 
