@@ -558,9 +558,25 @@ Tests run automatically on push/PR via GitHub Actions:
 - MicroPython tests: Self-hosted runner with ESP32
 
 
-## TODO
+## Expect: 100-continue
 
-- Cookie attributes support (Path, Domain, Secure, HttpOnly, SameSite, Expires)
-- Expect: 100-continue support - currently causes deadlock (client waits for 100, server waits for body)
-- Streaming API for sending large responses (handle EAGAIN)
-- Chunked transfer encoding support (receiving and sending)
+Server supports `Expect: 100-continue` header for large uploads:
+
+**Non-event mode:** Server automatically sends `100 Continue` response when client sends `Expect: 100-continue` header, then waits for body.
+
+**Event mode:** Server sends `100 Continue` only when application calls `accept_body()`. This allows rejecting uploads early (e.g., respond with 413 or 401) without accepting body data.
+
+```python
+from uhttp.server import HttpServer, EVENT_HEADERS
+
+server = HttpServer(port=8080, event_mode=True)
+
+while True:
+    client = server.wait()
+    if client and client.event == EVENT_HEADERS:
+        if client.content_length > MAX_ALLOWED:
+            # No 100 Continue sent - client won't upload
+            client.respond({'error': 'too large'}, status=413)
+        else:
+            client.accept_body()  # Sends 100 Continue, starts receiving
+```
