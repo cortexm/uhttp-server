@@ -538,8 +538,13 @@ Requires [mpytool](https://github.com/cortexm/mpytool) and `uhttp-client`.
 
 ```bash
 # Install dependencies
-../.venv/bin/pip install -e ../mpytool uhttp-client
+../.venv/bin/pip install uhttp-client mpytool
+```
 
+uhttp-client - for other integration tests
+mpytool - for mpy_integration tests
+
+```bash
 # Run tests
 MPY_TEST_PORT=/dev/ttyUSB0 ../.venv/bin/python -m unittest tests.test_mpy_integration -v
 ```

@@ -24,6 +24,7 @@ Run tests:
 
 import json
 import os
+import socket
 import time
 import unittest
 from pathlib import Path
@@ -91,10 +92,6 @@ def requires_device(cls):
     return cls
 
 
-# Minimum free RAM for server tests (server.py is ~44KB)
-MIN_RAM_FOR_SERVER = 200000
-
-
 class MpyServerTestCase(unittest.TestCase):
     """Base class for MicroPython server tests"""
 
@@ -102,61 +99,50 @@ class MpyServerTestCase(unittest.TestCase):
     conn = None
     esp32_ip = None
     server_running = False
-    _server_uploaded = False
+    _mount_handler = None
 
     @classmethod
     def setUpClass(cls):
         import mpytool
+        from mpytool.mpy_cross import MpyCross
 
         cls.conn = mpytool.ConnSerial(port=PORT, baudrate=115200)
         cls.mpy = mpytool.Mpy(cls.conn)
+
+        # Soft reset to clear any previous state
+        cls.mpy.stop()
+        try:
+            cls.conn.write(b'\x03\x03\x04')  # Ctrl-C twice + Ctrl-D
+            time.sleep(2)
+            cls.conn.read_all()
+        except Exception:
+            pass
         cls.mpy.stop()
 
-        # Check RAM before uploading large server module
-        free_mem = cls.get_free_memory()
-        if free_mem < MIN_RAM_FOR_SERVER:
-            raise unittest.SkipTest(
-                f"Not enough RAM for server: {free_mem} < {MIN_RAM_FOR_SERVER}")
-
-        # Upload server module once
-        if not cls._server_uploaded:
-            cls._upload_server()
-            cls._server_uploaded = True
+        # Mount server module with mpy-cross compilation
+        server_dir = Path(__file__).parent.parent / 'uhttp'
+        mpy_cross = MpyCross()
+        mpy_cross.init(cls.mpy.platform())
+        cls._mount_handler = cls.mpy.mount(
+            str(server_dir), mount_point='/lib/uhttp', mpy_cross=mpy_cross)
 
         # Connect WiFi and get IP
         cls.esp32_ip = cls._connect_wifi()
 
-        # Start server on ESP32
+        # Start server and wait for it to be ready
         cls._start_server()
-
-    @classmethod
-    def get_free_memory(cls):
-        """Get free memory on device"""
-        result = cls.mpy.comm.exec_raw_paste(
-            "import gc; gc.collect(); print(gc.mem_free())", timeout=5)
-        return int(result.strip())
+        cls._wait_for_server()
 
     @classmethod
     def tearDownClass(cls):
-        cls._stop_server()
+        if cls.server_running:
+            try:
+                cls.mpy.stop()
+            except Exception:
+                pass
+            cls.server_running = False
         if cls.conn:
             cls.conn.close()
-
-    @classmethod
-    def _upload_server(cls):
-        """Upload server.py to ESP32"""
-        server_file = Path(__file__).parent.parent / 'uhttp' / 'server.py'
-        # Create /lib/uhttp directory
-        try:
-            cls.mpy.mkdir('/lib')
-        except Exception:
-            pass
-        try:
-            cls.mpy.mkdir('/lib/uhttp')
-        except Exception:
-            pass
-        # Upload server.py
-        cls.mpy.put(server_file.read_bytes(), '/lib/uhttp/server.py')
 
     @classmethod
     def _connect_wifi(cls):
@@ -192,20 +178,30 @@ else:
 
     @classmethod
     def _start_server(cls):
-        """Start HTTP server on ESP32 (fire-and-forget)"""
+        """Start HTTP server on ESP32"""
+        # Verify import works (also ensures mount is ready)
+        test_result = cls.mpy.comm.exec(
+            "import sys; sys.path.insert(0, '/lib'); "
+            "from uhttp.server import HttpServer; print('OK')",
+            timeout=10
+        ).decode('utf-8')
+        if 'OK' not in test_result:
+            raise RuntimeError(f"Failed to import uhttp.server: {test_result}")
+
+        # Start server (fire-and-forget)
         code = f"""
 import sys
 sys.path.insert(0, '/lib')
-
 from uhttp.server import HttpServer
 
 server = HttpServer(port={ESP32_SERVER_PORT})
-print('SERVER_STARTED')
 
 while True:
     client = server.wait(timeout=1)
     if client:
-        if client.path == '/json':
+        if client.path == '/health':
+            client.respond({{'status': 'ok'}})
+        elif client.path == '/json':
             client.respond({{'method': client.method, 'path': client.path}})
         elif client.path == '/echo':
             client.respond({{'data': client.data, 'method': client.method}})
@@ -218,37 +214,49 @@ while True:
         else:
             client.respond({{'path': client.path, 'method': client.method}})
 """
-        # Start server with timeout=0 (fire-and-forget)
         cls.mpy.comm.exec(code, timeout=0)
         cls.server_running = True
-        time.sleep(1)  # Give server time to start
+        time.sleep(0.5)
 
     @classmethod
-    def _stop_server(cls):
-        """Stop HTTP server on ESP32"""
-        if cls.server_running:
+    def _wait_for_server(cls, max_attempts=10):
+        """Wait for server to respond to health check"""
+        for _ in range(max_attempts):
             try:
-                cls.mpy.stop()
-                time.sleep(0.5)
-            except Exception:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                sock.connect((cls.esp32_ip, ESP32_SERVER_PORT))
+                sock.sendall(b'GET /health HTTP/1.0\r\nHost: test\r\n\r\n')
+                if b'200' in sock.recv(1024):
+                    sock.close()
+                    return
+                sock.close()
+            except (OSError, socket.timeout):
                 pass
-            cls.server_running = False
+            time.sleep(1)
+        raise RuntimeError(
+            f"Server not ready on {cls.esp32_ip}:{ESP32_SERVER_PORT}")
 
 
 @requires_device
 class TestHTTPServer(MpyServerTestCase):
     """Test HTTP server basic functionality"""
 
-    def _request(self, method, path, **kwargs):
+    def _request(self, method, path, retries=2, **kwargs):
         """Make HTTP request to ESP32 server"""
-        from uhttp.client import HttpClient
+        from uhttp.client import HttpClient, HttpConnectionError, HttpTimeoutError
         url = f"http://{self.esp32_ip}:{ESP32_SERVER_PORT}"
-        client = HttpClient(url)
-        try:
-            response = getattr(client, method.lower())(path, **kwargs).wait()
-            return response
-        finally:
-            client.close()
+        last_error = None
+        for _ in range(retries):
+            client = HttpClient(url, timeout=10)
+            try:
+                return getattr(client, method.lower())(path, **kwargs).wait()
+            except (HttpConnectionError, HttpTimeoutError) as e:
+                last_error = e
+                time.sleep(0.5)
+            finally:
+                client.close()
+        raise last_error
 
     def test_get_request(self):
         """Test basic GET request"""
