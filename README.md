@@ -12,6 +12,7 @@ Micro HTTP server for MicroPython and CPython.
 - SSL/TLS for HTTPS connections
 - IPv6 and dual-stack support
 - Event mode for streaming large uploads
+- WebSocket support (RFC 6455)
 - Memory-efficient (~32KB RAM minimum)
 
 ## Installation
@@ -277,6 +278,10 @@ Parameters:
 
 - Returns `True` if event mode is enabled
 
+**`max_ws_message_length`** (kwarg)
+
+- Maximum WebSocket message size before chunking (default: 64KB)
+
 #### Methods:
 
 **`event_write(self, sockets)`**
@@ -378,6 +383,18 @@ Parameters:
 
 - Application storage attribute for request state (read-write)
 
+**`is_websocket_request(self)`**
+
+- True if request is a WebSocket upgrade request
+
+**`is_websocket(self)`**
+
+- True if connection is in WebSocket mode
+
+**`ws_message(self)`**
+
+- Last received WebSocket message (str for text frames, bytes for binary frames)
+
 #### Methods:
 
 **`headers_get(self, key, default=None)`**
@@ -424,6 +441,117 @@ Parameters:
 
 - Read available data from buffer
 - Returns: bytes or None if no data available
+
+**`accept_websocket(self)`**
+
+- Accept WebSocket upgrade. Event mode: switches to WS mode. Non-event mode: returns `WebSocket` object.
+
+**`ws_send(self, data)`** (event mode, WebSocket)
+
+- Send WebSocket message. `str` → text frame, `bytes` → binary frame.
+
+**`ws_ping(self, data=b'')`** (event mode, WebSocket)
+
+- Send WebSocket ping frame
+
+**`ws_close(self, code=1000, reason='')`** (event mode, WebSocket)
+
+- Send WebSocket close frame and close connection
+
+
+## WebSocket Support
+
+uHTTP supports WebSocket connections (RFC 6455) in both event mode and non-event mode.
+
+### Event Mode (non-blocking, multiple connections)
+
+```python
+from uhttp.server import (
+    HttpServer, EVENT_REQUEST, EVENT_WS_REQUEST,
+    EVENT_WS_MESSAGE, EVENT_WS_CHUNK_FIRST,
+    EVENT_WS_CHUNK_NEXT, EVENT_WS_CHUNK_LAST,
+    EVENT_WS_PING, EVENT_WS_CLOSE
+)
+
+server = HttpServer(port=8080, event_mode=True)
+
+while True:
+    client = server.wait()
+    if not client:
+        continue
+
+    if client.event == EVENT_WS_REQUEST:
+        client.accept_websocket()
+
+    elif client.event == EVENT_REQUEST:
+        client.respond({'status': 'ok'})
+
+    elif client.event == EVENT_WS_MESSAGE:
+        # str for text frames, bytes for binary frames
+        client.ws_send(client.ws_message)  # echo
+
+    elif client.event == EVENT_WS_CHUNK_FIRST:
+        client.context = {'chunks': [client.ws_message]}
+
+    elif client.event == EVENT_WS_CHUNK_NEXT:
+        client.context['chunks'].append(client.ws_message)
+
+    elif client.event == EVENT_WS_CHUNK_LAST:
+        client.context['chunks'].append(client.ws_message)
+        # process all chunks...
+        client.ws_send('received')
+
+    elif client.event == EVENT_WS_PING:
+        pass  # pong sent automatically
+
+    elif client.event == EVENT_WS_CLOSE:
+        print("WebSocket closed")
+```
+
+### Non-Event Mode (blocking, simple)
+
+```python
+from uhttp.server import HttpServer
+
+server = HttpServer(port=8080)
+
+while True:
+    client = server.wait()
+    if client and client.is_websocket_request:
+        ws = client.accept_websocket()  # returns WebSocket object
+        while not ws.is_closed:
+            msg = ws.recv(timeout=5)
+            if msg is not None:
+                ws.send(msg)  # echo
+    elif client:
+        client.respond("hello")
+```
+
+### WebSocket API
+
+**HttpConnection properties:**
+- `is_websocket_request` - True if request is a WebSocket upgrade
+- `is_websocket` - True if connection is in WebSocket mode
+- `ws_message` - Last received message (str for text, bytes for binary)
+
+**HttpConnection methods (event mode):**
+- `accept_websocket()` - Accept upgrade, switch to WebSocket mode
+- `ws_send(data)` - Send message (str → text frame, bytes → binary frame)
+- `ws_ping(data=b'')` - Send ping frame
+- `ws_close(code=1000, reason='')` - Close WebSocket connection
+
+**WebSocket object (non-event mode):**
+- `recv(timeout=None)` - Receive message (blocking). Returns str/bytes/None
+- `send(data)` - Send message (str → text frame, bytes → binary frame)
+- `ping(data=b'')` - Send ping frame
+- `close(code=1000, reason='')` - Close connection
+- `is_closed` - True if connection is closed
+
+### Large Message Chunking
+
+Messages larger than `MAX_WS_MESSAGE_LENGTH` (default 64KB, configurable via `max_ws_message_length` kwarg) are delivered in chunks via `EVENT_WS_CHUNK_FIRST`, `EVENT_WS_CHUNK_NEXT`, `EVENT_WS_CHUNK_LAST` events. All chunk events contain data in `ws_message`.
+
+In non-event mode, messages exceeding the limit close the connection with status 1009.
 
 
 ## Event Mode
