@@ -148,29 +148,33 @@ class TestWebSocketEventMode(unittest.TestCase):
                         client.respond({'status': 'ok'})
 
                     elif client.event == EVENT_WS_MESSAGE:
+                        data = client.read_buffer()
                         cls.ws_events.append({
                             'event': 'message',
-                            'data': client.ws_message,
+                            'data': data,
                         })
-                        # Echo back
-                        client.ws_send(client.ws_message)
+                        # Echo back preserving frame type
+                        if client.ws_is_text:
+                            client.ws_send(data.decode('utf-8'))
+                        else:
+                            client.ws_send(data)
 
                     elif client.event == EVENT_WS_CHUNK_FIRST:
                         cls.ws_events.append({
                             'event': 'message_first',
-                            'data': client.ws_message,
+                            'data': client.read_buffer(),
                         })
 
                     elif client.event == EVENT_WS_CHUNK_NEXT:
                         cls.ws_events.append({
                             'event': 'message_next',
-                            'data': client.ws_message,
+                            'data': client.read_buffer(),
                         })
 
                     elif client.event == EVENT_WS_CHUNK_LAST:
                         cls.ws_events.append({
                             'event': 'message_last',
-                            'data': client.ws_message,
+                            'data': client.read_buffer(),
                         })
                         # Echo total size
                         total = sum(
@@ -307,8 +311,8 @@ class TestWebSocketEventMode(unittest.TestCase):
         finally:
             sock.close()
 
-    def test_text_message_is_str(self):
-        """Test that text frame ws_message is str"""
+    def test_text_message_is_bytes(self):
+        """Test that text frame read_buffer returns bytes"""
         sock = self._connect_ws()
         try:
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'čau'))
@@ -317,8 +321,8 @@ class TestWebSocketEventMode(unittest.TestCase):
             msg_events = [
                 e for e in self.ws_events if e['event'] == 'message']
             self.assertEqual(len(msg_events), 1)
-            self.assertIsInstance(msg_events[0]['data'], str)
-            self.assertEqual(msg_events[0]['data'], 'čau')
+            self.assertIsInstance(msg_events[0]['data'], bytes)
+            self.assertEqual(msg_events[0]['data'], 'čau'.encode('utf-8'))
         finally:
             sock.close()
 
@@ -529,10 +533,13 @@ class TestWebSocketNonEventMode(unittest.TestCase):
                         # Echo loop in thread
                         def echo_loop(ws_conn):
                             while not ws_conn.is_closed:
-                                msg = ws_conn.recv(timeout=5)
-                                if msg is None:
-                                    break
-                                ws_conn.send(msg)
+                                event = ws_conn.wait(timeout=5)
+                                if event == EVENT_WS_MESSAGE:
+                                    data = ws_conn.read_buffer()
+                                    if ws_conn.ws_is_text:
+                                        ws_conn.send(data.decode('utf-8'))
+                                    else:
+                                        ws_conn.send(data)
                         t = threading.Thread(
                             target=echo_loop, args=(ws,), daemon=True)
                         t.start()
@@ -695,13 +702,14 @@ class TestWebSocketLargeMessages(unittest.TestCase):
                     elif client.event in (
                             EVENT_WS_MESSAGE, EVENT_WS_CHUNK_FIRST,
                             EVENT_WS_CHUNK_NEXT, EVENT_WS_CHUNK_LAST):
+                        data = client.read_buffer()
                         cls.ws_events.append({
                             'event': client.event,
-                            'data': client.ws_message,
-                            'len': len(client.ws_message),
+                            'data': data,
+                            'len': len(data) if data else 0,
                         })
                         if client.event == EVENT_WS_MESSAGE:
-                            client.ws_send(f"ok:{len(client.ws_message)}")
+                            client.ws_send(f"ok:{len(data) if data else 0}")
                         elif client.event == EVENT_WS_CHUNK_LAST:
                             total = sum(
                                 e['len'] for e in cls.ws_events

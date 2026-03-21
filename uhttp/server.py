@@ -322,6 +322,106 @@ class _WsFrameMixin:
         self._ws_message_opcode = None
         self._ws_fragment_buffer = bytearray()
         self._ws_control_buffer = bytearray()
+        self._ws_chunked = False
+        self._ws_message = None
+
+    @property
+    def ws_is_text(self):
+        """True if current message is text frame"""
+        return self._ws_message_opcode == WS_OPCODE_TEXT
+
+    def _ws_process_buffer(self):
+        """Process WebSocket frames from buffer.
+        Returns True if event is ready.
+        Requires subclass to provide: _ws_do_send(data), _ws_on_close()
+        and attributes: _buffer, _event, _max_ws_message_length"""
+        while True:
+            if not self._ws_frame_header_parsed:
+                if not self._ws_parse_frame_header():
+                    return False
+
+            available = min(len(self._buffer), self._ws_frame_remaining)
+            if available == 0 and self._ws_frame_remaining > 0:
+                return False
+
+            # Cap demask size to detect limit crossing early
+            if (available > 0
+                    and not self._ws_chunked
+                    and self._ws_frame_opcode < 0x8):
+                space = (self._max_ws_message_length + 1
+                         - len(self._ws_fragment_buffer))
+                if space > 0:
+                    available = min(available, space)
+
+            if available > 0:
+                chunk = self._ws_demask(available)
+                self._ws_frame_remaining -= available
+
+                if self._ws_frame_opcode >= 0x8:
+                    self._ws_control_buffer.extend(chunk)
+                else:
+                    self._ws_fragment_buffer.extend(chunk)
+                    if self._ws_chunked:
+                        frame_done = self._ws_frame_remaining == 0
+                        msg_done = frame_done and self._ws_frame_fin
+                        if frame_done:
+                            self._ws_frame_header_parsed = False
+                        if msg_done:
+                            self._ws_chunked = False
+                            self._event = EVENT_WS_CHUNK_LAST
+                        else:
+                            self._event = EVENT_WS_CHUNK_NEXT
+                        return True
+
+            frame_done = self._ws_frame_remaining == 0
+            if not frame_done:
+                if (len(self._ws_fragment_buffer)
+                        > self._max_ws_message_length):
+                    self._ws_chunked = True
+                    self._event = EVENT_WS_CHUNK_FIRST
+                    return True
+                return False
+
+            # Frame complete
+            self._ws_frame_header_parsed = False
+
+            # Control frame
+            if self._ws_frame_opcode >= 0x8:
+                if self._ws_frame_opcode == WS_OPCODE_PING:
+                    self._ws_do_send(_ws_build_frame(
+                        WS_OPCODE_PONG,
+                        bytes(self._ws_control_buffer)))
+                    self._ws_message = bytes(self._ws_control_buffer)
+                    self._event = EVENT_WS_PING
+                    self._ws_control_buffer = bytearray()
+                    return True
+                if self._ws_frame_opcode == WS_OPCODE_CLOSE:
+                    self._ws_do_send(_ws_build_frame(
+                        WS_OPCODE_CLOSE,
+                        bytes(self._ws_control_buffer)))
+                    self._ws_message = (
+                        bytes(self._ws_control_buffer)
+                        if self._ws_control_buffer else None)
+                    self._event = EVENT_WS_CLOSE
+                    self._ws_control_buffer = bytearray()
+                    self._ws_on_close()
+                    return True
+                # Pong - ignore
+                self._ws_control_buffer = bytearray()
+                continue
+
+            if (len(self._ws_fragment_buffer)
+                    > self._max_ws_message_length):
+                self._ws_chunked = True
+                self._event = EVENT_WS_CHUNK_FIRST
+                return True
+
+            # Data frame complete
+            if self._ws_frame_fin:
+                self._event = EVENT_WS_MESSAGE
+                return True
+
+            continue
 
     def _ws_parse_frame_header(self):
         """Parse WebSocket frame header from buffer"""
@@ -334,6 +434,9 @@ class _WsFrameMixin:
         self._ws_frame_opcode = opcode
         if opcode != WS_OPCODE_CONTINUATION and opcode < 0x8:
             self._ws_message_opcode = opcode
+            # Auto-clear unread data from previous message
+            if self._ws_fragment_buffer:
+                self._ws_fragment_buffer = bytearray()
         masked = bool(b1 & 0x80)
         length = b1 & 0x7F
         offset = 2
@@ -376,15 +479,17 @@ class _WsFrameMixin:
 
 
 class WebSocket(_WsFrameMixin):
-    """WebSocket connection for non-event mode (blocking)"""
+    """WebSocket connection (non-blocking, event-driven)"""
 
     def __init__(self, connection):
         self._socket = connection._socket
         self._buffer = connection._buffer
+        self._send_buffer = bytearray()
         self._connection = connection
         self._closed = False
-        self._max_message_length = connection._max_ws_message_length
+        self._max_ws_message_length = connection._max_ws_message_length
         self._chunk_size = connection._file_chunk_size
+        self._event = None
         super().__init__()
 
     @property
@@ -392,46 +497,80 @@ class WebSocket(_WsFrameMixin):
         """True if WebSocket is closed"""
         return self._closed
 
-    def recv(self, timeout=None):
-        """Receive message. Returns str for text, bytes for binary,
-        None on close or timeout."""
+    @property
+    def event(self):
+        """Current event type"""
+        return self._event
+
+    @property
+    def send_pending(self):
+        """True if there is unsent data in send buffer"""
+        return len(self._send_buffer) > 0
+
+    @property
+    def read_sockets(self):
+        """Sockets to monitor for reading, used for select"""
+        if self._closed or self._socket is None:
+            return []
+        return [self._socket]
+
+    @property
+    def write_sockets(self):
+        """Sockets to monitor for writing, used for select"""
+        if self._closed or self._socket is None or not self._send_buffer:
+            return []
+        return [self._socket]
+
+    def wait(self, timeout=None):
+        """Wait for WebSocket event.
+        Returns event type or None on timeout."""
         if self._closed:
             return None
-        while True:
-            result = self._process()
-            if result is not None:
-                return result if result is not False else None
-            try:
-                ready, _, _ = _select.select(
-                    [self._socket], [], [], timeout)
-            except (OSError, ValueError):
-                self._closed = True
-                return None
-            if not ready:
-                return None
-            try:
-                data = self._socket.recv(self._chunk_size)
-            except OSError as err:
-                if err.errno in (errno.EAGAIN, errno.ENOENT):
-                    continue
-                self._closed = True
-                return None
-            if data is None:
-                continue
-            if not data:
-                self._closed = True
-                return None
-            self._buffer.extend(data)
+        if self._send_buffer:
+            self._try_flush_send()
+        if self._ws_process_buffer():
+            return self._event
+        try:
+            w = [self._socket] if self._send_buffer else []
+            ready_r, ready_w, _ = _select.select(
+                [self._socket], w, [], timeout)
+        except (OSError, ValueError):
+            self._closed = True
+            return None
+        return self.process_events(ready_r, ready_w)
+
+    def process_events(self, read_sockets, write_sockets):
+        """Process select results for external select loop.
+        Returns event type or None."""
+        if self._closed:
+            return None
+        if self._socket in write_sockets:
+            self._try_flush_send()
+        if self._socket in read_sockets:
+            if not self._recv():
+                return self._event
+        if self._ws_process_buffer():
+            return self._event
+        return None
+
+    def read_buffer(self):
+        """Read accumulated message/chunk data"""
+        if not self._ws_fragment_buffer:
+            return None
+        data = bytes(self._ws_fragment_buffer)
+        self._ws_fragment_buffer = bytearray()
+        return data
 
     def send(self, data):
-        """Send message. str -> text frame, bytes -> binary frame."""
+        """Send WebSocket frame.
+        str -> text frame, bytes -> binary frame."""
         if self._closed:
             return
         if isinstance(data, str):
-            frame = _ws_build_frame(WS_OPCODE_TEXT, data.encode('utf-8'))
+            self._ws_do_send(_ws_build_frame(
+                WS_OPCODE_TEXT, data.encode('utf-8')))
         else:
-            frame = _ws_build_frame(WS_OPCODE_BINARY, data)
-        self._do_send(frame)
+            self._ws_do_send(_ws_build_frame(WS_OPCODE_BINARY, data))
 
     def ping(self, data=b''):
         """Send ping frame"""
@@ -439,7 +578,7 @@ class WebSocket(_WsFrameMixin):
             return
         if isinstance(data, str):
             data = data.encode('utf-8')
-        self._do_send(_ws_build_frame(WS_OPCODE_PING, data))
+        self._ws_do_send(_ws_build_frame(WS_OPCODE_PING, data))
 
     def close(self, code=1000, reason=''):
         """Close WebSocket connection"""
@@ -450,65 +589,58 @@ class WebSocket(_WsFrameMixin):
         payload.append(code & 0xFF)
         if reason:
             payload.extend(reason.encode('utf-8'))
-        self._do_send(_ws_build_frame(WS_OPCODE_CLOSE, bytes(payload)))
+        self._ws_do_send(_ws_build_frame(WS_OPCODE_CLOSE, bytes(payload)))
+        self._ws_on_close()
+
+    def _ws_do_send(self, data):
+        """Add data to send buffer and try to flush"""
+        self._send_buffer.extend(data)
+        self._try_flush_send()
+
+    def _ws_on_close(self):
+        """Handle WebSocket close"""
         self._closed = True
         self._connection.close()
 
-    def _do_send(self, data):
-        """Send raw data to socket"""
-        try:
-            self._socket.send(data)
-        except OSError:
-            self._closed = True
+    def _try_flush_send(self):
+        """Try to send buffered data (non-blocking)"""
+        while self._send_buffer:
+            try:
+                sent = self._socket.send(self._send_buffer)
+            except OSError as err:
+                if err.errno == errno.EAGAIN:
+                    return
+                self._closed = True
+                return
+            # MicroPython SSL: buffer full returns None
+            if sent is None:
+                return
+            if sent > 0:
+                self._send_buffer = self._send_buffer[sent:]
+            else:
+                return
 
-    def _process(self):
-        """Process buffer. Returns message (str/bytes), False on close,
-        None if need more data."""
-        while True:
-            if not self._ws_frame_header_parsed:
-                if not self._ws_parse_frame_header():
-                    return None
-            available = min(
-                len(self._buffer), self._ws_frame_remaining)
-            if available == 0 and self._ws_frame_remaining > 0:
-                return None
-            if available > 0:
-                chunk = self._ws_demask(available)
-                self._ws_frame_remaining -= available
-                if self._ws_frame_opcode >= 0x8:
-                    self._ws_control_buffer.extend(chunk)
-                else:
-                    if (len(self._ws_fragment_buffer) + len(chunk)
-                            > self._max_message_length):
-                        self.close(1009, 'Message too large')
-                        return False
-                    self._ws_fragment_buffer.extend(chunk)
-            if self._ws_frame_remaining > 0:
-                return None
-            self._ws_frame_header_parsed = False
-            # Control frame complete
-            if self._ws_frame_opcode >= 0x8:
-                if self._ws_frame_opcode == WS_OPCODE_PING:
-                    self._do_send(_ws_build_frame(
-                        WS_OPCODE_PONG,
-                        bytes(self._ws_control_buffer)))
-                elif self._ws_frame_opcode == WS_OPCODE_CLOSE:
-                    self._do_send(_ws_build_frame(
-                        WS_OPCODE_CLOSE,
-                        bytes(self._ws_control_buffer)))
-                    self._closed = True
-                    self._connection.close()
-                    return False
-                self._ws_control_buffer = bytearray()
-                continue
-            # Data frame complete, check if message complete
-            if self._ws_frame_fin:
-                data = bytes(self._ws_fragment_buffer)
-                self._ws_fragment_buffer = bytearray()
-                if self._ws_message_opcode == WS_OPCODE_TEXT:
-                    return data.decode('utf-8')
-                return data
-            continue
+    def _recv(self):
+        """Read available data from socket.
+        Returns False if disconnected (sets _event)."""
+        try:
+            data = self._socket.recv(self._chunk_size)
+        except OSError as err:
+            if err.errno in (errno.EAGAIN, errno.ENOENT):
+                return True
+            self._event = EVENT_WS_CLOSE
+            self._ws_message = None
+            self._closed = True
+            return False
+        if data is None:
+            return True
+        if not data:
+            self._event = EVENT_WS_CLOSE
+            self._ws_message = None
+            self._closed = True
+            return False
+        self._buffer.extend(data)
+        return True
 
 
 class HttpConnection(_WsFrameMixin):
@@ -553,8 +685,6 @@ class HttpConnection(_WsFrameMixin):
         # WebSocket attributes
         _WsFrameMixin.__init__(self)
         self._ws_mode = False
-        self._ws_message = None
-        self._ws_chunked = False
         # Config from kwargs
         self._max_headers_length = kwargs.get(
             'max_headers_length', MAX_HEADERS_LENGTH)
@@ -1276,10 +1406,17 @@ class HttpConnection(_WsFrameMixin):
 
     def read_buffer(self):
         """Read available data from buffer.
+        In WS mode reads from fragment buffer, otherwise from receive buffer.
 
         Returns:
             bytes or None: Data from buffer, or None if no data available.
         """
+        if self._ws_mode:
+            if not self._ws_fragment_buffer:
+                return None
+            data = bytes(self._ws_fragment_buffer)
+            self._ws_fragment_buffer = bytearray()
+            return data
         if not self._buffer:
             return None
         chunk = bytes(self._buffer)
@@ -1488,11 +1625,13 @@ class HttpConnection(_WsFrameMixin):
         self._buffer.extend(data)
         self.update_activity()
 
-    def _ws_decode(self, data):
-        """Decode WS payload based on message opcode"""
-        if self._ws_message_opcode == WS_OPCODE_TEXT:
-            return data.decode('utf-8')
-        return data
+    def _ws_do_send(self, data):
+        """Send WebSocket frame data (hook for _WsFrameMixin)"""
+        self._send(data)
+
+    def _ws_on_close(self):
+        """Handle WebSocket close (hook for _WsFrameMixin)"""
+        self._ws_mode = False
 
     def _process_ws_event(self):
         """Process WebSocket data in event mode"""
@@ -1500,116 +1639,6 @@ class HttpConnection(_WsFrameMixin):
         if not self._buffer:
             return False
         return self._ws_process_buffer()
-
-    def _ws_process_buffer(self):
-        """Process WebSocket frames from buffer"""
-        while True:
-            if not self._ws_frame_header_parsed:
-                if not self._ws_parse_frame_header():
-                    return False
-
-            available = min(len(self._buffer), self._ws_frame_remaining)
-            if available == 0 and self._ws_frame_remaining > 0:
-                return False
-
-            # Cap demask size to detect limit crossing early.
-            # When space <= 0 (limit already exceeded), skip capping
-            # so data appends to fragment_buffer and triggers chunked mode.
-            if (available > 0
-                    and not self._ws_chunked
-                    and self._ws_frame_opcode < 0x8):
-                space = (self._max_ws_message_length + 1
-                         - len(self._ws_fragment_buffer))
-                if space > 0:
-                    available = min(available, space)
-
-            if available > 0:
-                chunk = self._ws_demask(available)
-                self._ws_frame_remaining -= available
-
-                if self._ws_frame_opcode >= 0x8:
-                    self._ws_control_buffer.extend(chunk)
-                elif self._ws_chunked:
-                    # Chunked mode - deliver chunk directly
-                    self._ws_message = self._ws_decode(chunk)
-                    frame_done = self._ws_frame_remaining == 0
-                    msg_done = frame_done and self._ws_frame_fin
-                    if frame_done:
-                        self._ws_frame_header_parsed = False
-                    if msg_done:
-                        self._ws_chunked = False
-                        self._event = EVENT_WS_CHUNK_LAST
-                    else:
-                        self._event = EVENT_WS_CHUNK_NEXT
-                    return True
-                else:
-                    self._ws_fragment_buffer.extend(chunk)
-
-            frame_done = self._ws_frame_remaining == 0
-            if not frame_done:
-                # Check if accumulated data exceeds limit
-                if (len(self._ws_fragment_buffer)
-                        > self._max_ws_message_length):
-                    self._ws_chunked = True
-                    data = bytes(self._ws_fragment_buffer)
-                    self._ws_fragment_buffer = bytearray()
-                    self._ws_message = self._ws_decode(data)
-                    self._event = EVENT_WS_CHUNK_FIRST
-                    return True
-                return False
-
-            # Frame complete
-            self._ws_frame_header_parsed = False
-
-            # Control frame complete
-            if self._ws_frame_opcode >= 0x8:
-                result = self._ws_handle_control()
-                self._ws_control_buffer = bytearray()
-                if result:
-                    return True
-                continue
-
-            # Check limit before delivering
-            if (len(self._ws_fragment_buffer)
-                    > self._max_ws_message_length):
-                self._ws_chunked = True
-                data = bytes(self._ws_fragment_buffer)
-                self._ws_fragment_buffer = bytearray()
-                self._ws_message = self._ws_decode(data)
-                self._event = EVENT_WS_CHUNK_FIRST
-                return True
-
-            # Data frame complete
-            if self._ws_frame_fin:
-                # Message complete and within limit
-                data = bytes(self._ws_fragment_buffer)
-                self._ws_fragment_buffer = bytearray()
-                self._ws_message = self._ws_decode(data)
-                self._event = EVENT_WS_MESSAGE
-                return True
-
-            continue
-
-    def _ws_handle_control(self):
-        """Handle WebSocket control frame.
-        Returns True if event ready."""
-        if self._ws_frame_opcode == WS_OPCODE_PING:
-            self._send(_ws_build_frame(
-                WS_OPCODE_PONG, bytes(self._ws_control_buffer)))
-            self._ws_message = bytes(self._ws_control_buffer)
-            self._event = EVENT_WS_PING
-            return True
-        if self._ws_frame_opcode == WS_OPCODE_CLOSE:
-            self._send(_ws_build_frame(
-                WS_OPCODE_CLOSE, bytes(self._ws_control_buffer)))
-            self._ws_message = (
-                bytes(self._ws_control_buffer)
-                if self._ws_control_buffer else None)
-            self._event = EVENT_WS_CLOSE
-            self._ws_mode = False
-            return True
-        # Pong - ignore silently
-        return False
 
 
 class HttpServer():
