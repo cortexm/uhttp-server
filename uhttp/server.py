@@ -1860,7 +1860,9 @@ class HttpServer():
         except (OSError, ValueError) as err:
             # EBADF: socket closed concurrently
             # ValueError: socket fileno() is -1 (closed)
-            if isinstance(err, ValueError) or err.errno == errno.EBADF:
+            # EINVAL (WinError 10022): invalid socket on Windows
+            if isinstance(err, ValueError) or err.errno in (
+                    errno.EBADF, errno.EINVAL):
                 return None
             raise
         return self.process_events(read_sockets, write_sockets)
