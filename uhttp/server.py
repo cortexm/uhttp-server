@@ -60,6 +60,19 @@ CONTENT_TYPE_MAP = {
     'webp': 'image/webp',
     'ico': 'image/x-icon',
     'bmp': 'image/bmp',
+    'js': 'application/javascript',
+    'css': 'text/css',
+    'json': 'application/json',
+    'xml': 'text/xml',
+    'txt': 'text/plain',
+    'woff': 'font/woff',
+    'woff2': 'font/woff2',
+    'ttf': 'font/ttf',
+    'mp3': 'audio/mpeg',
+    'mp4': 'video/mp4',
+    'wav': 'audio/wav',
+    'pdf': 'application/pdf',
+    'zip': 'application/zip',
 }
 METHODS = (
     'CONNECT', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST',
@@ -1447,12 +1460,12 @@ class HttpConnection(_WsFrameMixin):
         if self._socket is None:
             return
         headers = self._prepare_response(headers)
-        if data:
+        if data is not None:
             data = encode_response_data(headers, data)
 
         header = self._build_response_header(status, headers=headers, cookies=cookies)
         try:
-            if data:
+            if data is not None:
                 header_bytes = header.encode('ascii') if isinstance(header, str) else header
                 self._send(header_bytes + data)
             else:
