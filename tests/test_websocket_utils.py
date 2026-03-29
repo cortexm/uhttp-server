@@ -16,7 +16,7 @@ class TestWsAcceptKey(unittest.TestCase):
     def test_rfc_example(self):
         """Test with RFC 6455 example key"""
         key = "dGhlIHNhbXBsZSBub25jZQ=="
-        expected = "MWp/lNvnLAWD1TD0HICsGGCP88w="
+        expected = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
         self.assertEqual(_ws_accept_key(key), expected)
 
     def test_known_key(self):

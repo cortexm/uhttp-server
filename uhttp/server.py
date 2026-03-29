@@ -1602,6 +1602,7 @@ class HttpConnection(_WsFrameMixin):
                 WS_OPCODE_TEXT, data.encode('utf-8')))
         else:
             self._send(_ws_build_frame(WS_OPCODE_BINARY, data))
+        self.update_activity()
 
     def ws_ping(self, data=b''):
         """Send WebSocket ping (event mode)"""
