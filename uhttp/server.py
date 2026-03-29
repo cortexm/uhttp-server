@@ -103,7 +103,7 @@ WS_OPCODE_CLOSE = 0x8
 WS_OPCODE_PING = 0x9
 WS_OPCODE_PONG = 0xA
 
-_WS_MAGIC = b'258EAFA5-E914-47DA-95CA-5AB9141B3175'
+_WS_MAGIC = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 STATUS_CODES = {
     100: "Continue",
@@ -1740,6 +1740,8 @@ class HttpServer():
             if connection._ws_mode:
                 if connection.is_timed_out:
                     connection.close()
+                continue
+            if connection._response_started:
                 continue
             if not connection.is_loaded and connection.is_timed_out:
                 connection.respond(

@@ -471,6 +471,42 @@ class TestWebSocketEventMode(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_http_keepalive_then_ws_upgrade(self):
+        """Test HTTP keep-alive requests followed by WebSocket upgrade on same connection"""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(('localhost', self.PORT))
+            sock.settimeout(3)
+
+            # Send HTTP request on keep-alive connection
+            sock.sendall(
+                b"GET /test HTTP/1.1\r\n"
+                b"Host: localhost\r\n\r\n")
+            response = b''
+            while b'\r\n\r\n' not in response:
+                response += sock.recv(1024)
+            self.assertIn(b'200 OK', response)
+
+            # Send second HTTP request on same connection
+            sock.sendall(
+                b"GET /test2 HTTP/1.1\r\n"
+                b"Host: localhost\r\n\r\n")
+            response = b''
+            while b'\r\n\r\n' not in response:
+                response += sock.recv(1024)
+            self.assertIn(b'200 OK', response)
+
+            # Now upgrade to WebSocket on the same connection
+            ws_upgrade(sock)
+
+            # WebSocket should work
+            sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'after keepalive'))
+            fin, opcode, payload = recv_frame(sock)
+            self.assertEqual(opcode, WS_OPCODE_TEXT)
+            self.assertEqual(payload.decode(), 'after keepalive')
+        finally:
+            sock.close()
+
     def test_empty_ping(self):
         """Test ping with empty payload"""
         sock = self._connect_ws()
