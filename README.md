@@ -463,6 +463,8 @@ Parameters:
 
 uHTTP supports WebSocket connections (RFC 6455) in both event mode and non-event mode.
 
+**Important:** When using `process_events()` with external select loop, `event_mode=True` is required for WebSocket support.
+
 ### Event Mode (non-blocking, multiple connections)
 
 ```python
@@ -487,17 +489,20 @@ while True:
         client.respond({'status': 'ok'})
 
     elif client.event == EVENT_WS_MESSAGE:
-        # str for text frames, bytes for binary frames
-        client.ws_send(client.ws_message)  # echo
+        data = client.read_buffer()  # bytes
+        if client.ws_is_text:
+            client.ws_send(data.decode('utf-8'))  # echo as text
+        else:
+            client.ws_send(data)  # echo as binary
 
     elif client.event == EVENT_WS_CHUNK_FIRST:
-        client.context = {'chunks': [client.ws_message]}
+        client.context = {'chunks': [client.read_buffer()]}
 
     elif client.event == EVENT_WS_CHUNK_NEXT:
-        client.context['chunks'].append(client.ws_message)
+        client.context['chunks'].append(client.read_buffer())
 
     elif client.event == EVENT_WS_CHUNK_LAST:
-        client.context['chunks'].append(client.ws_message)
+        client.context['chunks'].append(client.read_buffer())
         # process all chunks...
         client.ws_send('received')
 
@@ -532,10 +537,12 @@ while True:
 **HttpConnection properties:**
 - `is_websocket_request` - True if request is a WebSocket upgrade
 - `is_websocket` - True if connection is in WebSocket mode
-- `ws_message` - Last received message (str for text, bytes for binary)
+- `ws_is_text` - True if current message is text frame (vs binary)
+- `ws_message` - Ping/close payload (only for `EVENT_WS_PING` and `EVENT_WS_CLOSE`)
 
 **HttpConnection methods (event mode):**
 - `accept_websocket()` - Accept upgrade, switch to WebSocket mode
+- `read_buffer()` - Read message data (returns bytes, use `ws_is_text` to check type)
 - `ws_send(data)` - Send message (str → text frame, bytes → binary frame)
 - `ws_ping(data=b'')` - Send ping frame
 - `ws_close(code=1000, reason='')` - Close WebSocket connection
@@ -549,7 +556,7 @@ while True:
 
 ### Large Message Chunking
 
-Messages larger than `MAX_WS_MESSAGE_LENGTH` (default 64KB, configurable via `max_ws_message_length` kwarg) are delivered in chunks via `EVENT_WS_CHUNK_FIRST`, `EVENT_WS_CHUNK_NEXT`, `EVENT_WS_CHUNK_LAST` events. All chunk events contain data in `ws_message`.
+Messages larger than `MAX_WS_MESSAGE_LENGTH` (default 64KB, configurable via `max_ws_message_length` kwarg) are delivered in chunks via `EVENT_WS_CHUNK_FIRST`, `EVENT_WS_CHUNK_NEXT`, `EVENT_WS_CHUNK_LAST` events. Read chunk data with `read_buffer()`, check frame type with `ws_is_text`.
 
 In non-event mode, messages exceeding the limit close the connection with status 1009.
 
