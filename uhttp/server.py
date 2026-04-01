@@ -781,7 +781,10 @@ class HttpConnection(_WsFrameMixin):
 
     @property
     def data(self):
-        """Content data"""
+        """Content data (parsed JSON/form or raw bytes)"""
+        # Lazy parse buffer on EVENT_COMPLETE (after accept_body)
+        if self._data is None and self._event == EVENT_COMPLETE and self._buffer:
+            self._process_data()
         return self._data
 
     @property
