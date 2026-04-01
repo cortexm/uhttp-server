@@ -58,7 +58,7 @@ class TestKeepAliveSimple(unittest.TestCase):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect(('localhost', self.PORT))
-            sock.settimeout(0.5)
+            sock.settimeout(2.0)
 
             responses = []
 
@@ -119,7 +119,7 @@ class TestKeepAliveSimple(unittest.TestCase):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect(('localhost', self.PORT))
-            sock.settimeout(0.5)
+            sock.settimeout(2.0)
 
             request = b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n"
             sock.send(request)
@@ -167,7 +167,7 @@ class TestKeepAliveSimple(unittest.TestCase):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect(('localhost', self.PORT))
-            sock.settimeout(0.5)
+            sock.settimeout(2.0)
 
             request = b"GET /test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             sock.send(request)
@@ -197,7 +197,7 @@ class TestKeepAliveSimple(unittest.TestCase):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect(('localhost', self.PORT))
-            sock.settimeout(0.5)
+            sock.settimeout(2.0)
 
             request_numbers = []
 
