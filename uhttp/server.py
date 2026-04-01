@@ -128,6 +128,7 @@ STATUS_CODES = {
     405: "Method Not Allowed",
     406: "Not Acceptable",
     408: "Request Timeout",
+    409: "Conflict",
     410: "Gone",
     411: "Length Required",
     413: "Payload Too Large",
