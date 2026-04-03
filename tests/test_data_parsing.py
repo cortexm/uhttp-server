@@ -468,5 +468,46 @@ class TestDataParsing(unittest.TestCase):
         self.assertEqual(self.last_request['path'], '/special/!@#$')
 
 
+class TestParseCookies(unittest.TestCase):
+    """Unit tests for parse_cookies function"""
+
+    def test_single_cookie(self):
+        self.assertEqual(uhttp_server.parse_cookies('session=abc123'), {'session': 'abc123'})
+
+    def test_multiple_cookies(self):
+        self.assertEqual(
+            uhttp_server.parse_cookies('user=john; token=xyz789'),
+            {'user': 'john', 'token': 'xyz789'})
+
+    def test_extra_spaces(self):
+        self.assertEqual(
+            uhttp_server.parse_cookies('  a = 1 ;  b = 2 '),
+            {'a': '1', 'b': '2'})
+
+    def test_empty_string(self):
+        self.assertEqual(uhttp_server.parse_cookies(''), {})
+
+    def test_no_equals(self):
+        self.assertEqual(uhttp_server.parse_cookies('invalid'), {})
+
+    def test_empty_key_ignored(self):
+        self.assertEqual(uhttp_server.parse_cookies('=value'), {})
+
+    def test_empty_value(self):
+        self.assertEqual(uhttp_server.parse_cookies('key='), {'key': ''})
+
+    def test_value_with_equals(self):
+        result = uhttp_server.parse_cookies('token=abc=def')
+        self.assertEqual(result, {'token': 'abc=def'})
+
+    def test_semicolon_only(self):
+        self.assertEqual(uhttp_server.parse_cookies(';'), {})
+
+    def test_multiple_semicolons(self):
+        self.assertEqual(
+            uhttp_server.parse_cookies('a=1;;;b=2'),
+            {'a': '1', 'b': '2'})
+
+
 if __name__ == '__main__':
     unittest.main()

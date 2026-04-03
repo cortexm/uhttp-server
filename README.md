@@ -223,6 +223,10 @@ See [examples/](../examples/) directory for complete working examples.
 
 - Parse parameters/directives from header value, returns dict
 
+**`uhttp.server.parse_cookies(raw_cookies)`**
+
+- Parse cookie string into dict
+
 **`uhttp.server.parse_query(raw_query, query=None)`**
 
 - Parse raw_query from URL, append it to existing query, returns dict

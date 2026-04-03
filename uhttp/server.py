@@ -246,6 +246,18 @@ def parse_query(raw_query, query=None):
     return query
 
 
+def parse_cookies(raw_cookies):
+    """Parse cookie string into dict"""
+    cookies = {}
+    for cookie_param in split_iter(raw_cookies, ';'):
+        if '=' in cookie_param:
+            key, val = cookie_param.split('=', 1)
+            key = key.strip()
+            if key:
+                cookies[key] = val.strip()
+    return cookies
+
+
 def parse_url(url):
     """Parse URL to path and query"""
     query = None
@@ -802,15 +814,8 @@ class HttpConnection(_WsFrameMixin):
     def cookies(self):
         """Cookies dict"""
         if self._cookies is None:
-            self._cookies = {}
             raw_cookies = self.headers_get_attribute(COOKIE)
-            if raw_cookies:
-                for cookie_param in split_iter(raw_cookies, ';'):
-                    if '=' in cookie_param:
-                        key, val = cookie_param.split('=')
-                        key = key.strip()
-                        if key:
-                            self._cookies[key] = val.strip()
+            self._cookies = parse_cookies(raw_cookies) if raw_cookies else {}
         return self._cookies
 
     @property
