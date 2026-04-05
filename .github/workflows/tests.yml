@@ -7,12 +7,11 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    runs-on: ${{ matrix.os }}
+  test-ubuntu:
+    runs-on: ubuntu-latest
     strategy:
       max-parallel: 1
       matrix:
-        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.14"]
 
     steps:
@@ -28,3 +27,49 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover -v tests/
+
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        python-version: ["3.10", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install .
+
+      - name: Run unit tests
+        run: python -m unittest discover -v tests/
+
+  micropython:
+    if: github.event_name == 'push'
+    needs: [test-ubuntu, test-windows]
+    runs-on: [self-hosted, Linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [ESP32]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          $HOME/actions-runner/.venv/bin/pip install -e .
+          $HOME/actions-runner/.venv/bin/pip install uhttp-client
+
+      - name: MicroPython tests (${{ matrix.device }})
+        run: |
+          export PATH="$HOME/actions-runner/.venv/bin:$PATH"
+          export MPY_TEST_PORT="$(cat $HOME/actions-runner/.config/mpytool/${{ matrix.device }})"
+          export MPY_WIFI_SSID="$(jq -r .ssid $HOME/actions-runner/.config/uhttp/wifi.json)"
+          export MPY_WIFI_PASSWORD="$(jq -r .password $HOME/actions-runner/.config/uhttp/wifi.json)"
+          python -m unittest tests.test_mpy_integration -v
