@@ -35,6 +35,7 @@ CONTENT_TYPE_JSON = 'application/json'
 CONTENT_TYPE_OCTET_STREAM = 'application/octet-stream'
 CONTENT_TYPE_MULTIPART_REPLACE = (
     'multipart/x-mixed-replace; boundary=' + BOUNDARY)
+CONTENT_TYPE_EVENT_STREAM = 'text/event-stream'
 CACHE_CONTROL = 'cache-control'
 CACHE_CONTROL_NO_CACHE = 'no-cache'
 LOCATION = 'Location'
@@ -1583,6 +1584,101 @@ class HttpConnection(_WsFrameMixin):
                 self._finalize_sent_response()
         except OSError:
             self.close()
+
+    def response_stream(self, content_type=None, headers=None, cookies=None):
+        """Start streaming response without Content-Length
+
+        Sends HTTP headers and keeps connection open for streaming data.
+        Use send() to send raw data or send_event() for SSE events.
+        Call response_stream_end() or close() when done.
+
+        Returns True on success, False if socket is closed.
+        """
+        if self._socket is None:
+            return False
+        headers = self._prepare_response(headers, is_multipart=True)
+
+        if CONTENT_TYPE not in headers:
+            headers[CONTENT_TYPE] = (
+                content_type or CONTENT_TYPE_EVENT_STREAM)
+        if CACHE_CONTROL not in headers:
+            headers[CACHE_CONTROL] = CACHE_CONTROL_NO_CACHE
+
+        header = self._build_response_header(200, headers=headers, cookies=cookies)
+        try:
+            self._send(header)
+        except OSError:
+            self.close()
+            return False
+        return True
+
+    def send_chunk(self, data):
+        """Send raw data chunk to stream
+
+        Args:
+            data: str or bytes to send
+
+        Returns True on success, False if socket is closed.
+        """
+        if self._socket is None:
+            return False
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        try:
+            self._send(data)
+        except OSError:
+            self.close()
+            return False
+        return True
+
+    def send_event(self, data=None, event=None, event_id=None, retry=None):
+        """Send SSE event to stream
+
+        Args:
+            data: Event data (str or dict/list/tuple/int/float for JSON)
+            event: Event type name
+            event_id: Event ID for client reconnection
+            retry: Reconnection time in milliseconds
+
+        Returns True on success, False if socket is closed.
+        """
+        if self._socket is None:
+            return False
+        try:
+            if event_id is not None:
+                self._send(f'id: {event_id}\n')
+            if event is not None:
+                self._send(f'event: {event}\n')
+            if retry is not None:
+                self._send(f'retry: {retry}\n')
+            if data is not None:
+                if isinstance(data, (dict, list, tuple, int, float)):
+                    self._send(f'data: {_json.dumps(data)}\n')
+                else:
+                    start = 0
+                    while True:
+                        pos = data.find('\n', start)
+                        if pos < 0:
+                            self._send(f'data: {data[start:]}\n')
+                            break
+                        self._send(f'data: {data[start:pos]}\n')
+                        start = pos + 1
+            self._send('\n')
+        except OSError:
+            self.close()
+            return False
+        return True
+
+    def response_stream_end(self):
+        """End streaming response and close connection"""
+        self._is_multipart = False
+        self._response_keep_alive = False
+        try:
+            if not self.has_data_to_send:
+                self._finalize_sent_response()
+        except OSError:
+            pass
+        self.close()
 
     def respond_redirect(self, url, status=302, cookies=None):
         """Create redirect respond to URL"""

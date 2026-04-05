@@ -13,6 +13,7 @@ Micro HTTP server for MicroPython and CPython.
 - IPv6 and dual-stack support
 - Event mode for streaming large uploads
 - WebSocket support (RFC 6455)
+- Server-Sent Events (SSE) streaming
 - Memory-efficient (~32KB RAM minimum)
 
 ## Installation
@@ -433,6 +434,31 @@ Parameters:
 
 - Finish multipart stream
 
+**`response_stream(self, content_type=None, headers=None, cookies=None)`**
+
+- Start streaming response without Content-Length
+- Default content type: `text/event-stream`, sets `Cache-Control: no-cache`
+- Returns `True` on success, `False` if socket is closed
+
+**`send_chunk(self, data)`**
+
+- Send raw data chunk (str or bytes) to stream
+- Use for SSE comments (`: ping\n\n`), custom formats, or non-SSE streaming
+- Returns `True` on success, `False` if socket is closed
+
+**`send_event(self, data=None, event=None, event_id=None, retry=None)`**
+
+- Send formatted SSE event
+- `data` - str or dict/list/tuple/int/float (auto JSON serialized). Multi-line strings split into multiple `data:` lines
+- `event` - Event type name (client listens via `addEventListener()`)
+- `event_id` - Event ID for client reconnection (`Last-Event-ID` header)
+- `retry` - Reconnection time in milliseconds
+- Returns `True` on success, `False` if socket is closed
+
+**`response_stream_end(self)`**
+
+- End stream and close connection
+
 **`accept_body(self, streaming=False, to_file=None)`** (event mode only)
 
 - Accept body after `EVENT_HEADERS`. Call this to start receiving body data.
@@ -461,6 +487,79 @@ Parameters:
 **`ws_close(self, code=1000, reason='')`** (event mode, WebSocket)
 
 - Send WebSocket close frame and close connection
+
+
+## Server-Sent Events (SSE)
+
+SSE enables one-way server-to-client streaming over HTTP. The browser's `EventSource` API handles automatic reconnection.
+
+### Basic SSE Stream
+
+```python
+import time
+import uhttp.server
+
+server = uhttp.server.HttpServer(port=8080)
+sse_clients = []
+
+while True:
+    client = server.wait(timeout=0.1)
+
+    if client:
+        if client.path == '/events':
+            if client.response_stream():
+                sse_clients.append(client)
+        else:
+            client.respond("hello")
+
+    # Send events to connected clients
+    for sc in list(sse_clients):
+        if not sc.send_event({'temp': 23.5}, event='sensor', event_id=1):
+            sse_clients.remove(sc)  # Client disconnected
+```
+
+### SSE with Reconnection Support
+
+When a client reconnects, the browser sends `Last-Event-ID` header automatically:
+
+```python
+if client.path == '/events':
+    last_id = client.header('last-event-id')
+    client.response_stream()
+    if last_id:
+        # Resend missed events from history
+        for event in history.since(int(last_id)):
+            client.send_event(event['data'], event_id=event['id'])
+    sse_clients.append(client)
+```
+
+### Keep-alive
+
+Send comments periodically to prevent proxy/load balancer timeouts:
+
+```python
+if time.time() - last_ping > 15:
+    for sc in list(sse_clients):
+        if not sc.send_chunk(': ping\n\n'):
+            sse_clients.remove(sc)
+```
+
+### SSE Protocol Format
+
+```
+id: 1
+event: sensor
+retry: 5000
+data: {"temp": 23.5}
+
+```
+
+- Each field on its own line, event terminated by empty line
+- `data:` — event payload (required for client to receive data)
+- `event:` — event type, client listens via `addEventListener()`
+- `id:` — event ID, sent back as `Last-Event-ID` on reconnect
+- `retry:` — reconnection delay in milliseconds
+- `: comment` — ignored by client, used for keep-alive pings
 
 
 ## WebSocket Support
