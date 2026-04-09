@@ -791,9 +791,9 @@ The tests upload `server.py` to ESP32, start HTTP server, and send requests from
 
 ### CI
 
-Tests run automatically on push/PR via GitHub Actions:
-- Unit tests: Ubuntu + Windows, Python 3.10 + 3.14
-- MicroPython tests: Self-hosted runner with ESP32
+Tests run automatically via GitHub Actions:
+- Unit tests (push + PR): Ubuntu + Windows in parallel, Python 3.10 + 3.14
+- MicroPython tests (push only): Self-hosted runner with ESP32, runs after unit tests pass
 
 
 ## Expect: 100-continue
