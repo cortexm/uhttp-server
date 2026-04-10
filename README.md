@@ -260,6 +260,7 @@ Parameters:
   - `keep_alive_max_requests` - Max requests per connection (default: 100)
   - `max_headers_length` - Maximum header size in bytes (default: 4KB)
   - `max_content_length` - Maximum body size in bytes (default: 512KB, only enforced when event_mode=False)
+  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `remote_address` uses `X-Forwarded-For` header for connections from these IPs. When not set, `X-Forwarded-For` is ignored.
 
 #### Properties:
 
@@ -314,7 +315,19 @@ Parameters:
 
 **`addr(self)`**
 
-- Client address
+- Client address tuple (ip, port)
+
+**`socket_address(self)`**
+
+- Client socket address as string `ip:port` (always socket IP, ignores `X-Forwarded-For`)
+
+**`remote_address(self)`**
+
+- Client remote address. Returns first IP from `X-Forwarded-For` if connection is from `trusted_proxies`, otherwise socket address.
+
+**`remote_addresses(self)`**
+
+- Full `X-Forwarded-For` chain if from trusted proxy, otherwise socket address.
 
 **`method(self)`**
 

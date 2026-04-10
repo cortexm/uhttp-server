@@ -752,22 +752,47 @@ class HttpConnection(_WsFrameMixin):
         return self._addr
 
     @property
-    def remote_address(self):
-        """Return client address"""
-        forwarded = self.headers_get_attribute('x-forwarded-for')
-        if forwarded:
-            return forwarded.split(',')[0]
+    def socket_address(self):
+        """Return socket address (without X-Forwarded-For)"""
         addr = self._addr[0]
         if addr.startswith('::ffff:'):
             addr = addr[7:]  # Remove IPv4-mapped prefix
         return f"{addr}:{self._addr[1]}"
 
     @property
+    def remote_address(self):
+        """Return client address
+
+        If trusted_proxies is configured and connection comes from
+        a trusted proxy, returns first address from X-Forwarded-For.
+        Otherwise returns socket address.
+        """
+        if self._server._trusted_proxies:
+            addr = self._addr[0]
+            if addr.startswith('::ffff:'):
+                addr = addr[7:]
+            if addr in self._server._trusted_proxies:
+                forwarded = self.headers_get_attribute('x-forwarded-for')
+                if forwarded:
+                    return forwarded.split(',')[0].strip()
+        return self.socket_address
+
+    @property
     def remote_addresses(self):
-        """Return client address"""
-        forwarded = self.headers_get_attribute('x-forwarded-for')
-        if forwarded:
-            return forwarded
+        """Return all client addresses from X-Forwarded-For
+
+        If trusted_proxies is configured and connection comes from
+        a trusted proxy, returns X-Forwarded-For value.
+        Otherwise returns socket address.
+        """
+        if self._server._trusted_proxies:
+            addr = self._addr[0]
+            if addr.startswith('::ffff:'):
+                addr = addr[7:]
+            if addr in self._server._trusted_proxies:
+                forwarded = self.headers_get_attribute('x-forwarded-for')
+                if forwarded:
+                    return forwarded
         return f"{self._addr[0]}:{self._addr[1]}"
 
     @property
@@ -1787,6 +1812,7 @@ class HttpServer():
                 returns clients at different stages (headers, data, complete).
                 If False (default), wait() only returns fully loaded requests.
         """
+        self._trusted_proxies = kwargs.pop('trusted_proxies', None)
         self._kwargs = kwargs
         self._ssl_context = ssl_context
         self._event_mode = event_mode
