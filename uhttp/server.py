@@ -1366,6 +1366,14 @@ class HttpConnection(_WsFrameMixin):
             self._error = f"Failed to write file: {err}"
             self._event = EVENT_ERROR
 
+    @staticmethod
+    def _check_header_value(val):
+        """Check header value for CRLF injection"""
+        val = str(val)
+        if '\r' in val or '\n' in val:
+            raise HttpError(f"Header value contains CR/LF: {val!r}")
+        return val
+
     def _build_response_header(self, status=200, headers=None, cookies=None):
         """Build HTTP response header string
 
@@ -1376,12 +1384,17 @@ class HttpConnection(_WsFrameMixin):
 
         if headers:
             for key, val in headers.items():
+                self._check_header_value(key)
+                self._check_header_value(val)
                 parts.append(f'{key}: {val}')
 
         if cookies:
             for key, val in cookies.items():
+                self._check_header_value(key)
                 if val is None:
                     val = '; Max-Age=0'
+                else:
+                    self._check_header_value(val)
                 parts.append(f'{SET_COOKIE}: {key}={val}')
 
         parts.append('\r\n')
