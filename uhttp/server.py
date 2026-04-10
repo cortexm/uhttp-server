@@ -190,7 +190,10 @@ class HttpErrorWithResponse(HttpError):
 
 
 def decode_percent_encoding(data):
-    """Decode percent encoded data (bytes)"""
+    """Decode percent encoded data (bytes)
+
+    Raises ValueError on invalid percent-encoding.
+    """
     if b'%' not in data:
         return data.replace(b'+', b' ')
     res = bytearray()
@@ -198,13 +201,16 @@ def decode_percent_encoding(data):
     n = len(data)
     while i < n:
         b = data[i]
-        if b == 37 and i + 2 < n:  # '%'
+        if b == 37:  # '%'
+            if i + 2 >= n:
+                raise ValueError(f"Truncated percent-encoding at position {i}")
             try:
                 res.append(int(bytes(data[i+1:i+3]), 16))
-                i += 3
-                continue
             except ValueError:
-                pass
+                raise ValueError(
+                    f"Invalid percent-encoding: %{chr(data[i+1])}{chr(data[i+2])}")
+            i += 3
+            continue
         res.append(32 if b == 43 else b)  # '+' -> ' '
         i += 1
     return bytes(res)

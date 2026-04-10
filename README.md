@@ -581,6 +581,8 @@ uHTTP supports WebSocket connections (RFC 6455) in both event mode and non-event
 
 **Important:** When using `process_events()` with external select loop, `event_mode=True` is required for WebSocket support.
 
+**Security:** The server does not validate the `Origin` header during WebSocket upgrade. To prevent cross-site WebSocket hijacking, validate the `Origin` header in your application before calling `accept_websocket()`.
+
 ### Event Mode (non-blocking, multiple connections)
 
 ```python
