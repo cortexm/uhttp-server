@@ -462,12 +462,24 @@ class _WsFrameMixin:
 
             continue
 
+    def _ws_protocol_error(self, reason):
+        """Send close frame with 1002 (protocol error) and raise"""
+        payload = (1002).to_bytes(2, 'big') + reason.encode('utf-8')
+        try:
+            self._ws_do_send(_ws_build_frame(WS_OPCODE_CLOSE, payload))
+        except (OSError, AttributeError):
+            pass
+        raise ClientError(f"WebSocket protocol error: {reason}")
+
     def _ws_parse_frame_header(self):
         """Parse WebSocket frame header from buffer"""
         buf = self._buffer
         if len(buf) < 2:
             return False
         b0, b1 = buf[0], buf[1]
+        # RFC 6455 §5.2: RSV bits must be 0 (no extensions negotiated)
+        if b0 & 0x70:
+            self._ws_protocol_error("reserved bits must be zero")
         self._ws_frame_fin = bool(b0 & 0x80)
         opcode = b0 & 0x0F
         self._ws_frame_opcode = opcode
@@ -477,6 +489,9 @@ class _WsFrameMixin:
             if self._ws_fragment_buffer:
                 self._ws_fragment_buffer = bytearray()
         masked = bool(b1 & 0x80)
+        # RFC 6455 §5.1: client frames must be masked
+        if not masked:
+            self._ws_protocol_error("client frame must be masked")
         length = b1 & 0x7F
         offset = 2
         if length == 126:
@@ -491,6 +506,12 @@ class _WsFrameMixin:
             for i in range(8):
                 length = (length << 8) | buf[2 + i]
             offset = 10
+        # RFC 6455 §5.5: control frames must have payload ≤125 and FIN=1
+        if opcode >= 0x8:
+            if length > 125:
+                self._ws_protocol_error("control frame too large")
+            if not self._ws_frame_fin:
+                self._ws_protocol_error("control frame must not be fragmented")
         if masked:
             if len(buf) < offset + 4:
                 return False

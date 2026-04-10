@@ -7,6 +7,7 @@ from uhttp.server import (
     _ws_accept_key, _ws_build_frame, _WS_MAGIC,
     WS_OPCODE_TEXT, WS_OPCODE_BINARY, WS_OPCODE_CLOSE,
     WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_CONTINUATION,
+    ClientError,
 )
 
 
@@ -222,16 +223,14 @@ class TestWsFrameHeaderParsing(unittest.TestCase):
             conn._socket.close()
             peer.close()
 
-    def test_parse_unmasked_frame(self):
-        """Test parsing unmasked frame (server-to-server or lenient)"""
+    def test_parse_unmasked_frame_rejected(self):
+        """Test that unmasked client frame is rejected (RFC 6455 §5.1)"""
         conn, peer = self._make_connection()
         try:
             frame = _ws_build_frame(WS_OPCODE_TEXT, b'Hello')
             conn._buffer = bytearray(frame)
-            result = conn._ws_parse_frame_header()
-            self.assertTrue(result)
-            self.assertIsNone(conn._ws_frame_mask)
-            self.assertEqual(conn._ws_frame_remaining, 5)
+            with self.assertRaises(ClientError):
+                conn._ws_parse_frame_header()
         finally:
             conn._socket.close()
             peer.close()
