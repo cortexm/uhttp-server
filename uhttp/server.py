@@ -24,6 +24,7 @@ FILE_CHUNK_SIZE = 4 * KB  # bytes - chunk size for streaming file responses
 MAX_WS_MESSAGE_LENGTH = 64 * KB  # max WebSocket message size before chunking
 KEEP_ALIVE_TIMEOUT = 15  # seconds
 KEEP_ALIVE_MAX_REQUESTS = 100  # max requests per connection
+REQUEST_TIMEOUT = 5  # seconds - max time from first byte to complete headers
 
 HEADERS_DELIMITERS = (b'\n\r\n', b'\n\n')
 BOUNDARY = 'frame'
@@ -758,6 +759,9 @@ class HttpConnection(_WsFrameMixin):
             'keep_alive_timeout', KEEP_ALIVE_TIMEOUT)
         self._keep_alive_max_requests = kwargs.get(
             'keep_alive_max_requests', KEEP_ALIVE_MAX_REQUESTS)
+        self._request_timeout = kwargs.get(
+            'request_timeout', REQUEST_TIMEOUT)
+        self._request_start = None
 
     def __del__(self):
         self.close()
@@ -1074,6 +1078,8 @@ class HttpConnection(_WsFrameMixin):
             self._process_data()
 
     def _read_headers(self):
+        if self._request_start is None:
+            self._request_start = _time.time()
         self._recv_to_buffer(self._max_headers_length)
         for delimiter in HEADERS_DELIMITERS:
             if delimiter in self._buffer:
@@ -1229,6 +1235,7 @@ class HttpConnection(_WsFrameMixin):
         self._body_complete = False
         self._to_file = None
         self._expect_continue = False
+        self._request_start = None
         self.update_activity()
 
     def close(self):
@@ -1935,6 +1942,13 @@ class HttpServer():
             if connection._response_started:
                 continue
             if not connection.is_loaded and connection.is_timed_out:
+                connection.respond(
+                    'Request Timeout', status=408,
+                    headers={CONNECTION: CONNECTION_CLOSE})
+            elif (not connection.is_loaded
+                    and connection._request_start
+                    and _time.time() - connection._request_start
+                    > connection._request_timeout):
                 connection.respond(
                     'Request Timeout', status=408,
                     headers={CONNECTION: CONNECTION_CLOSE})
