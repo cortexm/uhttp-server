@@ -1030,7 +1030,7 @@ class HttpConnection(_WsFrameMixin):
                 self._data = _json.loads(self._buffer)
             except ValueError as err:
                 raise HttpErrorWithResponse(
-                    400, f"JSON decode error: {err}") from err
+                    400, "Invalid JSON body") from err
         else:
             self._data = self._buffer
         self._buffer = bytearray()
@@ -1265,8 +1265,10 @@ class HttpConnection(_WsFrameMixin):
             return self.is_loaded
         except HttpErrorWithResponse as err:
             self.respond(
-                data=str(err), status=err.status,
-                headers={CONNECTION: CONNECTION_CLOSE})
+                data=str(err).encode('utf-8'), status=err.status,
+                headers={
+                    CONNECTION: CONNECTION_CLOSE,
+                    CONTENT_TYPE: 'text/plain; charset=UTF-8'})
         except ClientError:
             self.close()
         return None
