@@ -1569,12 +1569,15 @@ class HttpConnection(_WsFrameMixin):
     def respond_file(self, file_name, headers=None):
         """Respond with file content, streaming asynchronously to minimize memory usage
 
+        WARNING: Caller must validate file_name to prevent path traversal.
+        This method does not restrict file access to any base directory.
+
         To force connection close, set headers['connection'] = 'close'.
         """
         try:
             file_size = _os.stat(file_name)[6]  # st_size
         except (OSError, ImportError, AttributeError):
-            self.respond(data=f'File not found: {file_name}', status=404)
+            self.respond(data='File not found', status=404)
             return
 
         headers = self._prepare_response(headers)
