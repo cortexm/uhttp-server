@@ -199,8 +199,8 @@ class TestContentLengthSecurity(unittest.TestCase):
 
         time.sleep(0.2)
 
-        # Both behaviors are acceptable - using first or returning error
-        self.assertTrue("200" in response or "400" in response)
+        # RFC 7230: duplicate Content-Length must be rejected
+        self.assertIn("400", response)
 
     def test_content_length_larger_than_available(self):
         """

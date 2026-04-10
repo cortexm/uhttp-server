@@ -1024,7 +1024,15 @@ class HttpConnection(_WsFrameMixin):
                 self._parse_http_request(line)
             else:
                 key, val = parse_header_line(line)
+                # RFC 7230: reject duplicate Content-Length or Host
+                if key in (CONTENT_LENGTH, HOST) and key in self._headers:
+                    raise HttpErrorWithResponse(
+                        400, f"Duplicate {key} header")
                 self._headers[key] = val
+
+        # Reject Transfer-Encoding (chunked not supported)
+        if 'transfer-encoding' in self._headers:
+            raise HttpErrorWithResponse(501, "Transfer-Encoding not supported")
 
         # RFC 2616: HTTP/1.1 requires Host header
         if self._protocol == 'HTTP/1.1' and 'host' not in self._headers:
