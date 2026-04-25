@@ -14,6 +14,7 @@ Micro HTTP server for MicroPython and CPython.
 - Event mode for streaming large uploads
 - WebSocket support (RFC 6455)
 - Server-Sent Events (SSE) streaming
+- NDJSON streaming responses (`application/x-ndjson`)
 - Memory-efficient (~32KB RAM minimum)
 
 ## Installation
@@ -468,9 +469,21 @@ Parameters:
 - `retry` - Reconnection time in milliseconds
 - Returns `True` on success, `False` if socket is closed
 
+**`response_ndjson(self, headers=None, cookies=None)`**
+
+- Start NDJSON streaming response (`application/x-ndjson`)
+- Thin wrapper over `response_stream()` with NDJSON content type
+- Returns `True` on success, `False` if socket is closed
+
+**`send_ndjson(self, obj)`**
+
+- Serialize one JSON-serializable value as a single NDJSON line (`json.dumps(obj) + '\n'`)
+- `obj` - any JSON-serializable value (dict/list/str/int/float/bool/None)
+- Returns `True` on success, `False` if socket is closed
+
 **`response_stream_end(self)`**
 
-- End stream and close connection
+- End stream and close connection (used for both SSE and NDJSON)
 
 **`accept_body(self, streaming=False, to_file=None)`** (event mode only)
 
@@ -573,6 +586,79 @@ data: {"temp": 23.5}
 - `id:` — event ID, sent back as `Last-Event-ID` on reconnect
 - `retry:` — reconnection delay in milliseconds
 - `: comment` — ignored by client, used for keep-alive pings
+
+
+## NDJSON Streaming
+
+NDJSON (Newline-Delimited JSON, `application/x-ndjson`) is a minimal one-way server-to-client streaming format: one JSON value per line, separated by `\n`. Compared to SSE it has no field structure (`event:`/`id:`/`retry:`) and no browser-side reconnect API — just raw JSON records. Useful for bulk data exports, log tailing, internal APIs, and any non-browser HTTP client that consumes a stream of records.
+
+### Basic NDJSON Stream
+
+```python
+import uhttp.server
+
+server = uhttp.server.HttpServer(port=8080)
+
+while True:
+    client = server.wait(timeout=0.1)
+    if not client:
+        continue
+
+    if client.path == '/export':
+        if client.response_ndjson():
+            for row in db.iter_rows():
+                if not client.send_ndjson(row):
+                    break  # client disconnected
+            client.response_stream_end()
+    else:
+        client.respond("hello")
+```
+
+### Stream Termination
+
+NDJSON has no in-band end-of-stream marker — the client detects end of stream by **TCP connection close** (EOF on `recv()`). Therefore `response_stream_end()` always closes the connection (no keep-alive).
+
+If you need to signal *why* the stream ended (e.g. completion vs. server-initiated abort), send a sentinel record on the application level before closing:
+
+```python
+client.send_ndjson({'_end': True, 'reason': 'done'})
+client.response_stream_end()
+```
+
+### Wire Format
+
+```
+{"id":1,"temp":23.5}
+{"id":2,"temp":23.7}
+{"id":3,"temp":23.6}
+```
+
+- One JSON value per line, terminated by `\n`
+- No leading/trailing wrapping; concatenation of records is the body
+- Each `send_ndjson()` call emits exactly one line
+- `json.dumps()` escapes embedded newlines, so records cannot break the framing
+
+### Client Example
+
+```python
+import requests, json
+with requests.get('http://localhost:8080/export', stream=True) as r:
+    for line in r.iter_lines():
+        if line:
+            record = json.loads(line)
+            print(record)
+```
+
+### NDJSON vs SSE
+
+| Aspect              | NDJSON                       | SSE                          |
+|---------------------|------------------------------|------------------------------|
+| Content type        | `application/x-ndjson`       | `text/event-stream`          |
+| Per-record metadata | none (just JSON)             | `event:`, `id:`, `retry:`    |
+| Browser API         | none (manual `fetch` stream) | `EventSource` w/ auto-reconnect |
+| Multi-line payload  | not allowed (one line = one record) | `data:` repeated per line |
+| End of stream       | TCP close                    | TCP close (or app-level event) |
+| Typical use         | bulk export, logs, APIs      | live UI updates in browser   |
 
 
 ## WebSocket Support

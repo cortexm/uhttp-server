@@ -37,6 +37,7 @@ CONTENT_TYPE_OCTET_STREAM = 'application/octet-stream'
 CONTENT_TYPE_MULTIPART_REPLACE = (
     'multipart/x-mixed-replace; boundary=' + BOUNDARY)
 CONTENT_TYPE_EVENT_STREAM = 'text/event-stream'
+CONTENT_TYPE_NDJSON = 'application/x-ndjson'
 CACHE_CONTROL = 'cache-control'
 CACHE_CONTROL_NO_CACHE = 'no-cache'
 LOCATION = 'Location'
@@ -1748,6 +1749,38 @@ class HttpConnection(_WsFrameMixin):
                             break
                         self._send(f'data: {data[start:pos]}\n')
                         start = pos + 1
+            self._send('\n')
+        except OSError:
+            self.close()
+            return False
+        return True
+
+    def response_ndjson(self, headers=None, cookies=None):
+        """Start NDJSON streaming response (application/x-ndjson).
+
+        Thin wrapper over response_stream() with NDJSON content-type.
+        Use send_ndjson() to send objects, response_stream_end() to finish.
+
+        Returns True on success, False if socket is closed.
+        """
+        return self.response_stream(
+                content_type=CONTENT_TYPE_NDJSON,
+                headers=headers, cookies=cookies)
+
+    def send_ndjson(self, obj):
+        """Send one JSON-serializable object as an NDJSON line.
+
+        Args:
+            obj: any JSON-serializable value (dict/list/str/int/float/bool/None)
+
+        Returns True on success, False if socket is closed.
+        """
+        if self._socket is None:
+            return False
+        try:
+            # two _send() calls reuse _send_buffer so the line goes out as
+            # a single TCP segment (same pattern as send_event)
+            self._send(_json.dumps(obj))
             self._send('\n')
         except OSError:
             self.close()
