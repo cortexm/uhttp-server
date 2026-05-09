@@ -22,6 +22,7 @@ MAX_HEADERS_LENGTH = 4 * KB
 MAX_CONTENT_LENGTH = 512 * KB
 FILE_CHUNK_SIZE = 4 * KB  # bytes - chunk size for streaming file responses
 MAX_WS_MESSAGE_LENGTH = 64 * KB  # max WebSocket message size before chunking
+MAX_SEND_BUFFER_SIZE = 64 * KB  # max pending bytes in send buffer (backpressure)
 KEEP_ALIVE_TIMEOUT = 15  # seconds
 KEEP_ALIVE_MAX_REQUESTS = 100  # max requests per connection
 REQUEST_TIMEOUT = 5  # seconds - max time from first byte to complete headers
@@ -733,7 +734,7 @@ class HttpConnection(_WsFrameMixin):
         self._query = None
         self._content_length = None
         self._cookies = None
-        self._is_multipart = False
+        self._is_streaming = False
         self._response_started = False
         self._response_keep_alive = False
         self._file_handle = None
@@ -762,6 +763,8 @@ class HttpConnection(_WsFrameMixin):
             'max_ws_message_length', MAX_WS_MESSAGE_LENGTH)
         self._file_chunk_size = kwargs.get(
             'file_chunk_size', FILE_CHUNK_SIZE)
+        self._max_send_buffer_size = kwargs.get(
+            'max_send_buffer_size', MAX_SEND_BUFFER_SIZE)
         self._keep_alive_timeout = kwargs.get(
             'keep_alive_timeout', KEEP_ALIVE_TIMEOUT)
         self._keep_alive_max_requests = kwargs.get(
@@ -1126,11 +1129,23 @@ class HttpConnection(_WsFrameMixin):
                 f"Headers too large: {len(self._buffer)} bytes (max {self._max_headers_length})")
 
     def _send(self, data):
-        """Add data to send buffer for async sending"""
+        """Add data to send buffer for async sending.
+
+        Backpressure: if buffer already holds pending data and adding
+        more would exceed _max_send_buffer_size, raises OSError. A
+        single large initial write into an empty buffer is always
+        accepted (typical respond(data=...) case). Slow consumers that
+        accumulate buffered data will trip the cap and the streaming
+        send_*() callers convert it to a False return.
+        """
         if self._socket is None:
             return
         if isinstance(data, str):
             data = data.encode('ascii')
+        if (self._send_buffer
+                and len(self._send_buffer) + len(data)
+                > self._max_send_buffer_size):
+            raise OSError("Send buffer overflow")
         self._send_buffer.extend(data)
         self.try_send()
 
@@ -1233,7 +1248,7 @@ class HttpConnection(_WsFrameMixin):
         if not self._response_started:
             return
 
-        if self._is_multipart or self._ws_mode:
+        if self._is_streaming or self._ws_mode:
             return
 
         if self._response_keep_alive:
@@ -1254,7 +1269,7 @@ class HttpConnection(_WsFrameMixin):
         self._query = None
         self._content_length = None
         self._cookies = None
-        self._is_multipart = False
+        self._is_streaming = False
         self._response_started = False
         self._response_keep_alive = False
         # Reset event mode attributes
@@ -1291,7 +1306,7 @@ class HttpConnection(_WsFrameMixin):
         """Process HTTP request when read event on client socket"""
         if self._socket is None:
             return None
-        if self._is_multipart:
+        if self._is_streaming:
             try:
                 self._probe_streaming_close()
             except ClientError:
@@ -1333,7 +1348,7 @@ class HttpConnection(_WsFrameMixin):
                 self._ws_mode = False
                 return True
 
-        if self._is_multipart:
+        if self._is_streaming:
             try:
                 self._probe_streaming_close()
             except ClientError:
@@ -1473,17 +1488,17 @@ class HttpConnection(_WsFrameMixin):
         parts.append('\r\n')
         return '\r\n'.join(parts)
 
-    def _prepare_response(self, headers=None, is_multipart=False):
+    def _prepare_response(self, headers=None, is_streaming=False):
         """Common response preparation, returns headers dict"""
         if self._response_started:
             raise HttpError("Response already sent for this request")
         self._response_started = True
-        self._is_multipart = is_multipart
+        self._is_streaming = is_streaming
 
         if headers is None:
             headers = {}
 
-        if not is_multipart:
+        if not is_streaming:
             keep_alive = self._should_keep_alive(headers)
             if CONNECTION not in headers:
                 headers[CONNECTION] = (
@@ -1650,7 +1665,7 @@ class HttpConnection(_WsFrameMixin):
         """Create multipart respond with headers as dict"""
         if self._socket is None:
             return False
-        headers = self._prepare_response(headers, is_multipart=True)
+        headers = self._prepare_response(headers, is_streaming=True)
 
         if CONTENT_TYPE not in headers:
             headers[CONTENT_TYPE] = CONTENT_TYPE_MULTIPART_REPLACE
@@ -1693,7 +1708,7 @@ class HttpConnection(_WsFrameMixin):
         """Finish multipart stream"""
         if not boundary:
             boundary = BOUNDARY
-        self._is_multipart = False
+        self._is_streaming = False
 
         # Determine keep-alive behavior (multipart was started without Connection header)
         # Use default protocol behavior
@@ -1723,7 +1738,7 @@ class HttpConnection(_WsFrameMixin):
         """
         if self._socket is None:
             return False
-        headers = self._prepare_response(headers, is_multipart=True)
+        headers = self._prepare_response(headers, is_streaming=True)
 
         if CONTENT_TYPE not in headers:
             headers[CONTENT_TYPE] = (
@@ -1830,7 +1845,7 @@ class HttpConnection(_WsFrameMixin):
 
     def response_stream_end(self):
         """End streaming response and close connection"""
-        self._is_multipart = False
+        self._is_streaming = False
         self._response_keep_alive = False
         try:
             if not self.has_data_to_send:
@@ -1872,29 +1887,60 @@ class HttpConnection(_WsFrameMixin):
 
     def ws_send(self, data):
         """Send WebSocket message (event mode).
-        str -> text frame, bytes -> binary frame."""
-        if isinstance(data, str):
-            self._send(_ws_build_frame(
-                WS_OPCODE_TEXT, data.encode('utf-8')))
-        else:
-            self._send(_ws_build_frame(WS_OPCODE_BINARY, data))
-        self.update_activity()
+        str -> text frame, bytes -> binary frame.
+
+        Returns True on success, False if socket is closed or the send
+        buffer cap was hit (slow consumer)."""
+        if self._socket is None:
+            return False
+        try:
+            if isinstance(data, str):
+                self._send(_ws_build_frame(
+                    WS_OPCODE_TEXT, data.encode('utf-8')))
+            else:
+                self._send(_ws_build_frame(WS_OPCODE_BINARY, data))
+            self.update_activity()
+        except OSError:
+            self.close()
+            return False
+        return True
 
     def ws_ping(self, data=b''):
-        """Send WebSocket ping (event mode)"""
+        """Send WebSocket ping (event mode).
+
+        Returns True on success, False if socket is closed or buffer
+        cap was hit."""
+        if self._socket is None:
+            return False
         if isinstance(data, str):
             data = data.encode('utf-8')
-        self._send(_ws_build_frame(WS_OPCODE_PING, data))
+        try:
+            self._send(_ws_build_frame(WS_OPCODE_PING, data))
+        except OSError:
+            self.close()
+            return False
+        return True
 
     def ws_close(self, code=1000, reason=''):
-        """Send WebSocket close and close connection (event mode)"""
+        """Send WebSocket close and close connection (event mode).
+
+        Always closes the connection; returns True if the close frame
+        was queued, False if it could not be (socket already closed
+        or buffer cap)."""
+        if self._socket is None:
+            return False
         payload = bytearray()
         payload.append((code >> 8) & 0xFF)
         payload.append(code & 0xFF)
         if reason:
             payload.extend(reason.encode('utf-8'))
-        self._send(_ws_build_frame(WS_OPCODE_CLOSE, bytes(payload)))
+        sent = True
+        try:
+            self._send(_ws_build_frame(WS_OPCODE_CLOSE, bytes(payload)))
+        except OSError:
+            sent = False
         self.close()
+        return sent
 
     # -- WebSocket internal methods --
 
@@ -2013,7 +2059,7 @@ class HttpServer():
     def _cleanup_idle_connections(self):
         """Remove timed out idle connections"""
         for connection in list(self._waiting_connections):
-            if connection._is_multipart:
+            if connection._is_streaming:
                 continue
             if connection._ws_mode:
                 if connection.is_timed_out:

@@ -4,7 +4,7 @@ Test that streaming/multipart connections detect peer EOF and don't
 busy-spin when the client closes its end of the TCP connection.
 
 Regression: previously HttpConnection.process_request*() short-circuited
-with `if self._is_multipart: return False` without calling recv().
+with `if self._is_streaming: return False` without calling recv().
 After the client closed TCP the kernel kept signalling readable on the
 half-closed fd, so select() returned immediately every iteration and the
 event loop spun at 100% CPU until the stream connection went away.
