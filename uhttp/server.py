@@ -1007,6 +1007,31 @@ class HttpConnection(_WsFrameMixin):
         self._buffer.extend(buffer)
         self.update_activity()
 
+    def _probe_streaming_close(self):
+        """Detect peer close on a streaming/multipart connection.
+
+        Streaming responses (multipart, SSE, NDJSON, response_stream)
+        are unidirectional: server -> client. A readable event on the
+        socket therefore means either the peer closed its end (EOF) or
+        sent unsolicited bytes which we silently discard. Raises
+        HttpDisconnected on EOF or socket error so the caller can close
+        the connection. Without this probe a half-closed fd keeps
+        firing on select() and busy-spins the event loop.
+        """
+        try:
+            data = self._socket.recv(self._file_chunk_size)
+        except OSError as err:
+            if err.errno in (errno.EAGAIN, errno.ENOENT):
+                return
+            raise HttpDisconnected(f"{err}: {self.addr}") from err
+        if data is None:
+            # MicroPython SSL: handshake / would-block
+            return
+        if not data:
+            raise HttpDisconnected(
+                f"Streaming client closed: {self.addr}")
+        self.update_activity()
+
     def _parse_http_request(self, line):
         if line.count(b' ') != 2:
             readable = line.decode('utf-8', errors='replace')
@@ -1267,6 +1292,10 @@ class HttpConnection(_WsFrameMixin):
         if self._socket is None:
             return None
         if self._is_multipart:
+            try:
+                self._probe_streaming_close()
+            except ClientError:
+                self.close()
             return False
         try:
             if self._method is None:
@@ -1305,6 +1334,13 @@ class HttpConnection(_WsFrameMixin):
                 return True
 
         if self._is_multipart:
+            try:
+                self._probe_streaming_close()
+            except ClientError:
+                # Peer closed the streaming response (EOF). Close
+                # silently; the application will learn about it on
+                # its next send_*(). No EVENT_STREAM_CLOSE today.
+                self.close()
             return False
 
         try:
@@ -1677,6 +1713,11 @@ class HttpConnection(_WsFrameMixin):
         Sends HTTP headers and keeps connection open for streaming data.
         Use send() to send raw data or send_event() for SSE events.
         Call response_stream_end() or close() when done.
+
+        The connection becomes long-lived: the server stops processing
+        further request events on it and the application owns its
+        lifetime. Peer close (EOF) is detected automatically — the
+        connection is closed and the next send_*() call returns False.
 
         Returns True on success, False if socket is closed.
         """
