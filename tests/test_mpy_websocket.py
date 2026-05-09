@@ -291,7 +291,12 @@ while True:
             else:
                 client.respond({{'path': client.path}})
         elif client.event == EVENT_WS_MESSAGE:
-            client.ws_send(client.ws_message)
+            # read_buffer() returns None for empty data frame
+            data = client.read_buffer() or b''
+            if client.ws_is_text:
+                client.ws_send(data.decode('utf-8'))
+            else:
+                client.ws_send(data)
         elif client.event == EVENT_WS_PING:
             pass
         elif client.event == EVENT_WS_CLOSE:
