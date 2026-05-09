@@ -142,8 +142,11 @@ class TestStreamingDisconnect(unittest.TestCase):
                 idle, 20,
                 f"event loop appears to busy-spin "
                 f"({idle} iterations in 0.5s, expected ~5)")
-            # Sanity: we DID make progress, not zero.
-            self.assertGreater(iters_at_cleanup, iters_before)
+            # Liveness: server thread is still running and progressing.
+            # Use the post-sleep sample because iters_at_cleanup races
+            # with the server thread's iterations += 1 (the close()
+            # happens inside wait(), before the increment).
+            self.assertGreater(iters_after, iters_before)
         finally:
             srv.stop()
 
