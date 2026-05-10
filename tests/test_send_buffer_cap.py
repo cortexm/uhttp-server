@@ -92,29 +92,42 @@ class TestSendBufferCap(unittest.TestCase):
         return sock
 
     def test_slow_client_trips_cap(self):
-        """Slow consumer: server eventually gets False from send_ndjson."""
-        # Tight cap so the test trips quickly even with kernel buffering.
-        srv = _SlowClientServer(port=self.PORT, max_send_buffer_size=4096)
-        srv.start()
+        """Slow consumer: server eventually gets False from send_ndjson.
+
+        Uses a monkey-patched _flush_send_buffer to simulate a TCP
+        socket that never drains. Necessary because real kernel
+        send/recv buffers vary by orders of magnitude across platforms
+        (Linux auto-tunes tcp_rmem up to 6 MB), making any
+        network-only version of this test non-deterministic.
+        """
+        original_flush = uhttp_server.HttpConnection._flush_send_buffer
+        uhttp_server.HttpConnection._flush_send_buffer = (
+            lambda self: False)
         try:
-            sock = self._slow_client(srv.port, recv_bufsize=2048)
+            srv = _SlowClientServer(
+                port=self.PORT, max_send_buffer_size=4096)
+            srv.start()
             try:
-                # Wait up to 3s for the server to hit the cap.
-                deadline = time.time() + 3.0
-                while time.time() < deadline:
-                    if srv.last_send_ok is False:
-                        break
-                    time.sleep(0.05)
-                self.assertEqual(
-                    srv.last_send_ok, False,
-                    f"send_ndjson never returned False after "
-                    f"{srv.send_attempts} attempts")
-                # Server cleaned up the connection.
-                self.assertEqual(len(srv.stream_clients), 0)
+                sock = self._slow_client(srv.port, recv_bufsize=2048)
+                try:
+                    # Wait up to 3s for the server to hit the cap.
+                    deadline = time.time() + 3.0
+                    while time.time() < deadline:
+                        if srv.last_send_ok is False:
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(
+                        srv.last_send_ok, False,
+                        f"send_ndjson never returned False after "
+                        f"{srv.send_attempts} attempts")
+                    # Server cleaned up the connection.
+                    self.assertEqual(len(srv.stream_clients), 0)
+                finally:
+                    sock.close()
             finally:
-                sock.close()
+                srv.stop()
         finally:
-            srv.stop()
+            uhttp_server.HttpConnection._flush_send_buffer = original_flush
 
     def test_fast_client_does_not_trip_cap(self):
         """Healthy reader: send_ndjson keeps returning True."""
