@@ -730,6 +730,7 @@ class HttpConnection(_WsFrameMixin):
         self._protocol = None
         self._headers = None
         self._data = None
+        self._data_loaded = False
         self._path = None
         self._query = None
         self._content_length = None
@@ -869,7 +870,7 @@ class HttpConnection(_WsFrameMixin):
     def data(self):
         """Content data (parsed JSON/form or raw bytes)"""
         # Lazy parse buffer on EVENT_COMPLETE (after accept_body)
-        if self._data is None and self._event == EVENT_COMPLETE and self._buffer:
+        if not self._data_loaded and self._event == EVENT_COMPLETE and self._buffer:
             self._process_data()
         return self._data
 
@@ -906,7 +907,7 @@ class HttpConnection(_WsFrameMixin):
         """True when request is fully loaded and ready for response"""
         if self._response_started:
             return False
-        return self._method and (not self.content_length or self._data)
+        return self._method and (not self.content_length or self._data_loaded)
 
     @property
     def is_timed_out(self):
@@ -1073,6 +1074,7 @@ class HttpConnection(_WsFrameMixin):
         else:
             self._data = self._buffer
         self._buffer = bytearray()
+        self._data_loaded = True
 
     def _process_headers(self, header_lines):
         self._headers = {}
@@ -1265,6 +1267,7 @@ class HttpConnection(_WsFrameMixin):
         self._protocol = None
         self._headers = None
         self._data = None
+        self._data_loaded = False
         self._path = None
         self._query = None
         self._content_length = None
@@ -1402,9 +1405,8 @@ class HttpConnection(_WsFrameMixin):
             return True
 
         # Check if small body already arrived with headers
-        # _data may be set by _process_headers() or buffer may have the data
-        if self._data is not None or len(self._buffer) >= self.content_length:
-            if self._data is None:
+        if self._data_loaded or len(self._buffer) >= self.content_length:
+            if not self._data_loaded:
                 self._process_data()
             self._event = EVENT_REQUEST
             self._requests_count += 1
