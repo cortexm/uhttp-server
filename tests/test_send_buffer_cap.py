@@ -155,7 +155,11 @@ class TestSendBufferCap(unittest.TestCase):
                 self.assertNotEqual(
                     srv.last_send_ok, False,
                     "fast reader still triggered the cap — bug?")
-                self.assertGreater(srv.send_attempts, 10)
+                # Loose lower bound: server loop is gated by wait(timeout=0.05)
+                # so in 0.5s we get ~10 iterations on Linux but can hit
+                # exactly 10 on slower Windows loopback. We just need proof
+                # that multiple sends succeeded without tripping the cap.
+                self.assertGreaterEqual(srv.send_attempts, 3)
             finally:
                 sock.close()
         finally:
