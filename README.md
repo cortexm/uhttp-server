@@ -261,6 +261,8 @@ Parameters:
   - `keep_alive_max_requests` - Max requests per connection (default: 100)
   - `max_headers_length` - Maximum header size in bytes (default: 4KB)
   - `max_content_length` - Maximum body size in bytes (default: 512KB, only enforced when event_mode=False)
+  - `max_send_buffer_size` - Maximum pending bytes in send buffer for backpressure (default: 64KB). When a slow client cannot drain TCP fast enough, `_send()` raises `OSError` instead of growing `_send_buffer` unbounded.
+  - `max_ws_message_length` - Maximum WebSocket message size before chunking (default: 64KB)
   - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `remote_address` uses `X-Forwarded-For` header for connections from these IPs. When not set, `X-Forwarded-For` is ignored.
 
 #### Properties:
@@ -284,10 +286,6 @@ Parameters:
 **`event_mode(self)`**
 
 - Returns `True` if event mode is enabled
-
-**`max_ws_message_length`** (kwarg)
-
-- Maximum WebSocket message size before chunking (default: 64KB)
 
 #### Methods:
 
