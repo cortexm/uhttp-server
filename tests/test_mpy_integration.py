@@ -109,15 +109,10 @@ class MpyServerTestCase(unittest.TestCase):
         cls.conn = mpytool.ConnSerial(port=PORT, baudrate=115200)
         cls.mpy = mpytool.Mpy(cls.conn)
 
-        # Soft reset to clear any previous state
-        cls.mpy.stop()
-        try:
-            cls.conn.write(b'\x03\x03\x04')  # Ctrl-C twice + Ctrl-D
-            time.sleep(2)
-            cls.conn.read_all()
-        except Exception:
-            pass
-        cls.mpy.stop()
+        # Wipe filesystem and machine-reset to drop any leftover state
+        # (open sockets, WiFi, mounted VFS, files) from a previous run.
+        # Soft reset alone does not free runtime resources.
+        cls.mpy.wipe()
 
         # Mount server module with mpy-cross compilation
         server_dir = Path(__file__).parent.parent / 'uhttp'
