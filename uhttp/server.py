@@ -16,8 +16,8 @@ KB = 2 ** 10
 MB = 2 ** 20
 GB = 2 ** 30
 
-LISTEN_SOCKETS = 2
-MAX_WAITING_CLIENTS = 5
+LISTEN_SOCKETS = 8
+MAX_WAITING_CLIENTS = 32
 MAX_HEADERS_LENGTH = 4 * KB
 MAX_CONTENT_LENGTH = 512 * KB
 FILE_CHUNK_SIZE = 4 * KB  # bytes - chunk size for streaming file responses
@@ -436,17 +436,31 @@ class _WsFrameMixin:
             # Control frame
             if self._ws_frame_opcode >= 0x8:
                 if self._ws_frame_opcode == WS_OPCODE_PING:
-                    self._ws_do_send(_ws_build_frame(
-                        WS_OPCODE_PONG,
-                        bytes(self._ws_control_buffer)))
+                    # Auto-pong may raise OSError if the send buffer cap is
+                    # hit (slow/dead consumer or ping flood). Treat as a
+                    # close rather than letting it crash the event loop.
+                    try:
+                        self._ws_do_send(_ws_build_frame(
+                            WS_OPCODE_PONG,
+                            bytes(self._ws_control_buffer)))
+                    except OSError:
+                        self._ws_message = None
+                        self._event = EVENT_WS_CLOSE
+                        self._ws_control_buffer = bytearray()
+                        self._ws_on_close()
+                        return True
                     self._ws_message = bytes(self._ws_control_buffer)
                     self._event = EVENT_WS_PING
                     self._ws_control_buffer = bytearray()
                     return True
                 if self._ws_frame_opcode == WS_OPCODE_CLOSE:
-                    self._ws_do_send(_ws_build_frame(
-                        WS_OPCODE_CLOSE,
-                        bytes(self._ws_control_buffer)))
+                    # Closing anyway: swallow a send buffer overflow.
+                    try:
+                        self._ws_do_send(_ws_build_frame(
+                            WS_OPCODE_CLOSE,
+                            bytes(self._ws_control_buffer)))
+                    except OSError:
+                        pass
                     self._ws_message = (
                         bytes(self._ws_control_buffer)
                         if self._ws_control_buffer else None)
@@ -1068,7 +1082,11 @@ class HttpConnection(_WsFrameMixin):
         elif CONTENT_TYPE_JSON in content_type_parts:
             try:
                 self._data = _json.loads(self._buffer)
-            except ValueError as err:
+            except (ValueError, RuntimeError) as err:
+                # ValueError: malformed JSON. RuntimeError: deeply nested
+                # JSON exhausts the recursion limit (RecursionError is a
+                # subclass of RuntimeError on both CPython and MicroPython).
+                # Without this an attacker crashes the loop with a tiny body.
                 raise HttpErrorWithResponse(
                     400, "Invalid JSON body") from err
         else:
@@ -1470,7 +1488,8 @@ class HttpConnection(_WsFrameMixin):
         Connection header is added automatically based on keep-alive decision if not explicitly set.
         To force connection close, set headers['connection'] = 'close'.
         """
-        parts = [f'{PROTOCOLS[-1]} {status} {STATUS_CODES[status]}']
+        # .get() tolerates custom/unknown status codes without KeyError
+        parts = [f'{PROTOCOLS[-1]} {status} {STATUS_CODES.get(status, "")}']
 
         if headers:
             for key, val in headers.items():

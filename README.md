@@ -256,13 +256,16 @@ Parameters:
 - `ssl_context` - Optional `ssl.SSLContext` for HTTPS connections (default: None)
 - `event_mode` - Enable event mode for streaming uploads (default: False)
 - `**kwargs` - Additional options:
-  - `max_waiting_clients` - Maximum concurrent connections (default: 5)
-  - `keep_alive_timeout` - Keep-alive timeout in seconds (default: 30)
+  - `max_waiting_clients` - Maximum concurrent connections (default: 32)
+  - `keep_alive_timeout` - Keep-alive timeout in seconds (default: 15)
   - `keep_alive_max_requests` - Max requests per connection (default: 100)
+  - `request_timeout` - Max seconds from first byte to complete headers (default: 5)
   - `max_headers_length` - Maximum header size in bytes (default: 4KB)
   - `max_content_length` - Maximum body size in bytes (default: 512KB, only enforced when event_mode=False)
   - `max_send_buffer_size` - Maximum pending bytes in send buffer for backpressure (default: 64KB). When a slow client cannot drain TCP fast enough, `_send()` raises `OSError` instead of growing `_send_buffer` unbounded.
   - `max_ws_message_length` - Maximum WebSocket message size before chunking (default: 64KB)
+  - `file_chunk_size` - Chunk size in bytes for streaming file responses (default: 4KB)
+  - `listen` - Listening socket backlog (default: 8)
   - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `remote_address` uses `X-Forwarded-For` header for connections from these IPs. When not set, `X-Forwarded-For` is ignored.
 
 #### Properties:
@@ -433,6 +436,13 @@ Parameters:
 **`respond_file(self, file_name, headers=None)`**
 
 - Respond with file content, streaming asynchronously to minimize memory usage
+- **⚠️ Security:** this method does **not** restrict file access to any base
+  directory and does **not** sanitize `file_name`. If you build `file_name`
+  from request data (e.g. `client.path`), an attacker can use `..` to escape
+  your web root (path traversal) and read arbitrary files. Always validate the
+  path yourself first: reject any segment equal to `..`, then join onto a fixed
+  base directory and verify the result stays inside it. Note `client.path` is
+  already percent-decoded, so `%2e%2e` and `..` look identical to your check.
 
 **`response_multipart(self, headers=None)`**
 
