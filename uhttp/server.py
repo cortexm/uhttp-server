@@ -313,7 +313,7 @@ def parse_header_line(line):
 def encode_response_data(headers, data):
     """encode response data by its type"""
     if isinstance(data, (dict, list, tuple, int, float)):
-        data = _json.dumps(data).encode('ascii')
+        data = _json.dumps(data).encode('utf-8')
         if CONTENT_TYPE not in headers:
             headers[CONTENT_TYPE] = CONTENT_TYPE_JSON
     elif isinstance(data, str):
@@ -1161,7 +1161,7 @@ class HttpConnection(_WsFrameMixin):
         if self._socket is None:
             return
         if isinstance(data, str):
-            data = data.encode('ascii')
+            data = data.encode('utf-8')
         if (self._send_buffer
                 and len(self._send_buffer) + len(data)
                 > self._max_send_buffer_size):
@@ -1643,7 +1643,7 @@ class HttpConnection(_WsFrameMixin):
         header = self._build_response_header(status, headers=headers, cookies=cookies)
         try:
             if data is not None:
-                header_bytes = header.encode('ascii') if isinstance(header, str) else header
+                header_bytes = header.encode('utf-8') if isinstance(header, str) else header
                 self._send(header_bytes + data)
             else:
                 self._send(header)
