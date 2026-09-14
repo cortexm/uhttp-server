@@ -6,7 +6,7 @@ python or micropython
 import os as _os
 import errno
 import socket as _socket
-import select as _select
+import selectors as _selectors
 import json as _json
 import time as _time
 import hashlib as _hashlib
@@ -555,190 +555,175 @@ class _WsFrameMixin:
         return bytes(data)
 
 
-class WebSocket(_WsFrameMixin):
-    """WebSocket connection (non-blocking, event-driven)"""
+class WebSocket:
+    """Non-event-mode WebSocket: a facade over the upgraded HttpConnection.
 
-    def __init__(self, connection):
-        self._socket = connection._socket
-        self._buffer = connection._buffer
-        self._send_buffer = bytearray()
+    Speaks the same owner protocol as HttpServer and HttpConnection, so it
+    is driven either by its own wait() or from a shared selector loop. All
+    framing, buffering and sending live on the connection.
+    """
+
+    def __init__(self, connection, selector=None):
         self._connection = connection
-        self._closed = False
-        self._max_ws_message_length = connection._max_ws_message_length
-        self._max_send_buffer_size = connection._max_send_buffer_size
-        self._chunk_size = connection._file_chunk_size
-        self._event = None
-        super().__init__()
+        self._sock = connection._socket  # kept for unregister() after close
+        self._owns_selector = selector is None
+        self._selector = selector or _selectors.DefaultSelector()
+        self._interest = None
+        self._update_interest()
+
+    @property
+    def selector(self):
+        """The selector this WebSocket registers its socket in"""
+        return self._selector
 
     @property
     def is_closed(self):
         """True if WebSocket is closed"""
-        return self._closed
+        return self._connection._socket is None
 
     @property
     def event(self):
         """Current event type"""
-        return self._event
+        return self._connection.event
+
+    @property
+    def ws_message(self):
+        """Ping/close payload of the current event"""
+        return self._connection.ws_message
+
+    @property
+    def ws_is_text(self):
+        """True if current message is text frame"""
+        return self._connection.ws_is_text
 
     @property
     def send_pending(self):
         """True if there is unsent data in send buffer"""
-        return len(self._send_buffer) > 0
-
-    @property
-    def read_sockets(self):
-        """Sockets to monitor for reading, used for select"""
-        if self._closed or self._socket is None:
-            return []
-        return [self._socket]
-
-    @property
-    def write_sockets(self):
-        """Sockets to monitor for writing, used for select"""
-        if self._closed or self._socket is None or not self._send_buffer:
-            return []
-        return [self._socket]
-
-    def wait(self, timeout=None):
-        """Wait for WebSocket event.
-        Returns event type or None on timeout."""
-        if self._closed:
-            return None
-        if self._send_buffer:
-            self._try_flush_send()
-        if self._ws_process_buffer():
-            return self._event
-        try:
-            w = [self._socket] if self._send_buffer else []
-            ready_r, ready_w, _ = _select.select(
-                [self._socket], w, [], timeout)
-        except (OSError, ValueError):
-            self._closed = True
-            return None
-        return self.process_events(ready_r, ready_w)
-
-    def process_events(self, read_sockets, write_sockets):
-        """Process select results for external select loop.
-        Returns event type or None."""
-        if self._closed:
-            return None
-        if self._socket in write_sockets:
-            self._try_flush_send()
-        if self._socket in read_sockets:
-            if not self._recv():
-                return self._event
-        if self._ws_process_buffer():
-            return self._event
-        return None
+        return self._connection.has_data_to_send
 
     def read_buffer(self):
         """Read accumulated message/chunk data"""
-        if not self._ws_fragment_buffer:
-            return None
-        data = bytes(self._ws_fragment_buffer)
-        self._ws_fragment_buffer = bytearray()
-        return data
+        return self._connection.read_buffer()
 
     def send(self, data):
         """Send WebSocket frame.
         str -> text frame, bytes -> binary frame.
 
-        Returns False if the socket is closed or the send buffer cap was
-        hit (slow consumer)."""
-        if self._closed:
-            return False
-        if isinstance(data, str):
-            frame = _ws_build_frame(WS_OPCODE_TEXT, data.encode('utf-8'))
-        else:
-            frame = _ws_build_frame(WS_OPCODE_BINARY, data)
-        return self._try_ws_send(frame)
+        Returns False if the socket is closed or the send buffer cap hit.
+        """
+        return self._sent(self._connection.ws_send(data))
 
     def ping(self, data=b''):
         """Send ping frame. Returns False if it could not be queued."""
-        if self._closed:
-            return False
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-        return self._try_ws_send(_ws_build_frame(WS_OPCODE_PING, data))
+        return self._sent(self._connection.ws_ping(data))
 
     def close(self, code=1000, reason=''):
-        """Close WebSocket connection"""
-        if self._closed:
-            return False
-        payload = bytearray()
-        payload.append((code >> 8) & 0xFF)
-        payload.append(code & 0xFF)
-        if reason:
-            payload.extend(reason.encode('utf-8'))
-        sent = self._try_ws_send(_ws_build_frame(
-            WS_OPCODE_CLOSE, bytes(payload)))
-        self._ws_on_close()
+        """Send close frame and close the connection"""
+        sent = self._connection.ws_close(code, reason)
+        self._unregister()
+        if self._owns_selector:
+            try:
+                self._selector.close()
+            except OSError:
+                pass
         return sent
 
-    def _try_ws_send(self, frame):
-        try:
-            self._ws_do_send(frame)
-        except OSError:
-            return False
-        return True
-
-    def _ws_do_send(self, data):
-        """Add data to send buffer and try to flush.
-
-        Raises OSError when the buffer cap is hit, so a dead consumer
-        cannot grow it without limit (same contract as HttpConnection).
-        """
-        if (self._send_buffer
-                and len(self._send_buffer) + len(data)
-                > self._max_send_buffer_size):
-            raise OSError("Send buffer overflow")
-        self._send_buffer.extend(data)
-        self._try_flush_send()
-
-    def _ws_on_close(self):
-        """Handle WebSocket close"""
-        self._closed = True
-        self._connection.close()
-
-    def _try_flush_send(self):
-        """Try to send buffered data (non-blocking)"""
-        while self._send_buffer:
+    def handle_event(self, fileobj, mask):
+        """Owner dispatch: returns self when an event is ready, else None"""
+        connection = self._connection
+        if connection._socket is None or fileobj is not connection._socket:
+            return None
+        if mask & _selectors.EVENT_WRITE:
+            connection.try_send()
+        if mask & _selectors.EVENT_READ and connection._socket is not None:
             try:
-                sent = self._socket.send(self._send_buffer)
-            except OSError as err:
-                if err.errno == errno.EAGAIN:
-                    return
-                self._closed = True
-                return
-            # MicroPython SSL: buffer full returns None
-            if sent is None:
-                return
-            if sent > 0:
-                self._send_buffer[:] = self._send_buffer[sent:]
-            else:
-                return
+                connection._ws_recv()
+            except ClientError:
+                return self._closed_event()
+        return self._process()
 
-    def _recv(self):
-        """Read available data from socket.
-        Returns False if disconnected (sets _event)."""
+    def next(self):
+        """Process a frame already in the receive buffer; True while ready.
+
+        One recv() can carry several frames that select() will not report
+        again, so drain with this before blocking.
+        """
+        if self._connection._socket is None or not self._connection._buffer:
+            return False
+        return self._process() is not None
+
+    def wait(self, timeout=None):
+        """Wait for a WebSocket event, driving this WebSocket's selector.
+
+        Returns the event type, or None on timeout. Requires an owned
+        selector: a blocking wait cannot service a shared one's other keys.
+        """
+        if not self._owns_selector:
+            raise HttpError(
+                "wait() needs the WebSocket's own selector; drive a shared "
+                "one with handle_event()")
+        if self.is_closed:
+            return None
+        if self.next():
+            return self.event
         try:
-            data = self._socket.recv(self._chunk_size)
-        except OSError as err:
-            if err.errno in (errno.EAGAIN, errno.ENOENT):
-                return True
-            self._event = EVENT_WS_CLOSE
-            self._ws_message = None
-            self._closed = True
-            return False
-        if data is None:
-            return True
-        if not data:
-            self._event = EVENT_WS_CLOSE
-            self._ws_message = None
-            self._closed = True
-            return False
-        self._buffer.extend(data)
-        return True
+            events = self._selector.select(timeout)
+        except (OSError, ValueError):
+            self._unregister()
+            return None
+        for key, mask in events:
+            if self.handle_event(key.fileobj, mask) is not None:
+                return self.event
+        return None
+
+    def _process(self):
+        """Parse buffered frames, then reconcile the selector interest"""
+        try:
+            ready = self._connection._ws_process_buffer()
+        except ClientError:
+            return self._closed_event()
+        self._update_interest()
+        return self if ready else None
+
+    def _closed_event(self):
+        connection = self._connection
+        connection._event = EVENT_WS_CLOSE
+        connection._ws_message = None
+        connection.close()
+        self._unregister()
+        return self
+
+    def _sent(self, ok):
+        self._update_interest()
+        return ok
+
+    def _update_interest(self):
+        connection = self._connection
+        if connection._socket is None:
+            self._unregister()
+            return
+        want = _selectors.EVENT_READ
+        if connection.has_data_to_send:
+            want |= _selectors.EVENT_WRITE
+        if want == self._interest:
+            return
+        method = 'register' if self._interest is None else 'modify'
+        try:
+            getattr(self._selector, method)(self._sock, want, self)
+        except (KeyError, ValueError, OSError):
+            connection.close()  # nothing could wake it again
+            self._interest = None
+            return
+        self._interest = want
+
+    def _unregister(self):
+        if self._interest is None:
+            return
+        try:
+            self._selector.unregister(self._sock)
+        except (KeyError, ValueError, OSError):
+            pass
+        self._interest = None
 
 
 class HttpConnection(_WsFrameMixin):
@@ -754,6 +739,8 @@ class HttpConnection(_WsFrameMixin):
         self._buffer = bytearray()
         self._send_buffer = bytearray()
         self._send_offset = 0
+        self._interest = None  # selector mask; None = not registered
+        self._detached = False  # handed off to a WebSocket object
         self._rx_bytes_counter = 0
         self._method = None
         self._url = None
@@ -1281,6 +1268,84 @@ class HttpConnection(_WsFrameMixin):
 
         if self._flush_send_buffer() and self._file_handle is None:
             self._finalize_sent_response()
+        self._update_interest()
+
+    def _selector_call(self, method, *args):
+        try:
+            getattr(self._server._selector, method)(self._socket, *args)
+        except (KeyError, ValueError, OSError):
+            return False
+        return True
+
+    def _register(self):
+        if self._selector_call('register', _selectors.EVENT_READ, self):
+            self._interest = _selectors.EVENT_READ
+            return True
+        return False
+
+    def _unregister(self):
+        if self._interest is not None and self._socket is not None:
+            self._selector_call('unregister')
+        self._interest = None
+
+    def _update_interest(self):
+        """Arm WRITE only while there is data to send; modify() on change only"""
+        if self._socket is None or self._interest is None:
+            return
+        want = _selectors.EVENT_READ
+        if self.has_data_to_send:
+            want |= _selectors.EVENT_WRITE
+        if want == self._interest:
+            return
+        if self._selector_call('modify', want, self):
+            self._interest = want
+        else:
+            self.close()  # can't be re-armed: it would hang forever
+
+    def handle_event(self, fileobj, mask):
+        """Owner dispatch for a selector event.
+
+        Returns this connection when a request/event is ready, else None.
+        """
+        if self._socket is None or self._detached:
+            return None
+        if mask & _selectors.EVENT_WRITE:
+            self.try_send()
+            if self._socket is None:
+                return None
+        if mask & _selectors.EVENT_READ:
+            if self._server.event_mode:
+                if self.process_request_event():
+                    return self
+            elif self.process_request():
+                return self
+        return None
+
+    def next(self):
+        """Process the next event already in the receive buffer.
+
+        One recv() may carry several WebSocket frames or body chunks that
+        select() will not report again. Returns True while another event
+        is ready on this connection.
+        """
+        if self._socket is None or self._detached:
+            return False
+        try:
+            if self._ws_mode and self._buffer:
+                return self._ws_process_buffer()
+            if (self._streaming_body and self._buffer
+                    and not self._body_complete):
+                return self._handle_streaming_body()
+        except ClientError as err:
+            if self._ws_mode:
+                self._event = EVENT_WS_CLOSE
+                self._ws_message = None
+                self._ws_mode = False
+            else:
+                self._error = str(err)
+                self._event = EVENT_ERROR
+            return True
+        return False
 
     def update_activity(self):
         """Update last activity timestamp"""
@@ -1358,6 +1423,8 @@ class HttpConnection(_WsFrameMixin):
         """Close connection (safe on a partially built instance)"""
         self._close_file_handle()
         self._close_body_file(delete=True)
+        if getattr(self, '_interest', None) is not None:
+            self._unregister()
         server = getattr(self, '_server', None)
         if server is not None:
             server.remove_connection(self)
@@ -1928,11 +1995,12 @@ class HttpConnection(_WsFrameMixin):
 
     # -- WebSocket methods --
 
-    def accept_websocket(self):
+    def accept_websocket(self, selector=None):
         """Accept WebSocket upgrade request.
 
         In event mode: switches connection to WS mode, no return value.
-        In non-event mode: returns WebSocket object for blocking I/O.
+        In non-event mode: returns a WebSocket. Pass selector= to drive it
+        from a shared loop instead of its own wait().
         """
         if not self.is_websocket_request:
             raise HttpError("Not a WebSocket upgrade request")
@@ -1956,8 +2024,10 @@ class HttpConnection(_WsFrameMixin):
             f'{SEC_WEBSOCKET_ACCEPT}: {accept}\r\n'
             '\r\n')
         if not self._server.event_mode:
+            self._detached = True
+            self._unregister()
             self._server.remove_connection(self)
-            return WebSocket(self)
+            return WebSocket(self, selector)
 
     def ws_send(self, data):
         """Send WebSocket message (event mode).
@@ -2067,6 +2137,10 @@ class HttpServer():
                 If False (default), wait() only returns fully loaded requests.
         """
         self._trusted_proxies = kwargs.pop('trusted_proxies', None)
+        # Shared selector may be passed in; an owned one is closed in close().
+        selector = kwargs.pop('selector', None)
+        self._owns_selector = selector is None
+        self._selector = selector or _selectors.DefaultSelector()
         self._kwargs = kwargs
         self._ssl_context = ssl_context
         self._event_mode = event_mode
@@ -2085,6 +2159,12 @@ class HttpServer():
         self._max_clients = kwargs.get(
             'max_waiting_clients', MAX_WAITING_CLIENTS)
         self._waiting_connections = []
+        self._resume = None  # last returned connection, drained via next()
+        self._last_maintenance = 0
+        self._maintenance_interval = min(
+            kwargs.get('keep_alive_timeout', KEEP_ALIVE_TIMEOUT),
+            kwargs.get('request_timeout', REQUEST_TIMEOUT)) / 2
+        self._selector.register(self._socket, _selectors.EVENT_READ, self)
 
     @property
     def socket(self):
@@ -2102,36 +2182,51 @@ class HttpServer():
         return self._event_mode
 
     @property
-    def read_sockets(self):
-        """All sockets waiting for communication, used for select"""
-        read_sockets = [
-            con.socket for con in self._waiting_connections
-            if con.socket is not None]
-        if self._socket is not None:
-            read_sockets.append(self._socket)
-        return read_sockets
+    def selector(self):
+        """The selectors.BaseSelector this server registers its sockets in.
 
-    @property
-    def write_sockets(self):
-        """All sockets with data to send, used for select"""
-        return [
-            con.socket for con in self._waiting_connections
-            if con.socket is not None and con.has_data_to_send]
+        Shared-selector loops read events from here and dispatch via
+        key.data.handle_event(); see wait() for the single-server case.
+        """
+        return self._selector
 
     def close(self):
-        """Close HTTP server"""
-        try:
-            self._socket.close()
-        except OSError:
-            pass
-        self._socket = None
+        """Close the server, its connections and (if owned) the selector"""
+        for connection in list(self._waiting_connections):
+            connection.close()
+        if self._socket is not None:
+            try:
+                self._selector.unregister(self._socket)
+            except (KeyError, ValueError, OSError):
+                pass
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+            self._socket = None
+        if self._owns_selector:
+            try:
+                self._selector.close()
+            except OSError:
+                pass
 
     def remove_connection(self, connection):
+        if connection is self._resume:
+            self._resume = None
         if connection in self._waiting_connections:
             self._waiting_connections.remove(connection)
 
-    def _cleanup_idle_connections(self):
-        """Remove timed out idle connections"""
+    def maintenance(self):
+        """Close idle / timed-out connections.
+
+        wait() calls this after each tick that returned events; call it once
+        per iteration when driving a shared selector yourself. Scans at most
+        once per half the shortest timeout.
+        """
+        now = _time.time()
+        if now - self._last_maintenance < self._maintenance_interval:
+            return
+        self._last_maintenance = now
         for connection in list(self._waiting_connections):
             if connection._is_streaming:
                 continue
@@ -2147,7 +2242,7 @@ class HttpServer():
                     headers={CONNECTION: CONNECTION_CLOSE})
             elif (not connection.is_loaded
                     and connection._request_start
-                    and _time.time() - connection._request_start
+                    and now - connection._request_start
                     > connection._request_timeout):
                 connection.respond(
                     'Request Timeout', status=408,
@@ -2190,97 +2285,55 @@ class HttpServer():
                 connection_to_remove.respond(
                     'Request Timeout, too many requests', status=408,
                     headers={CONNECTION: CONNECTION_CLOSE})
+                if connection_to_remove.has_data_to_send:
+                    connection_to_remove.close()  # stalled 408: don't leak
         self._waiting_connections.append(connection)
+        if not connection._register():
+            connection.close()
 
-    def event_read(self, sockets):
-        """Process sockets with read_event,
-        returns None or instance of HttpConnection with established connection"""
-        result = None
-
-        if self._socket in sockets:
+    def handle_event(self, fileobj, mask):
+        """Owner dispatch for the listening socket: accept, returns None"""
+        if self._socket is not None:
             self._accept()
-        else:
-            for connection in list(self._waiting_connections):
-                if connection.socket in sockets:
-                    if self._event_mode:
-                        if connection.process_request_event():
-                            result = connection
-                            break
-                    elif connection.process_request():
-                        result = connection
-                        break
-
-        self._cleanup_idle_connections()
-
-        return result
-
-    def _get_pending_connection(self):
-        """Get connection with pending data in buffer (event mode only)"""
-        if not self._event_mode:
-            return None
-        for connection in self._waiting_connections:
-            if connection._ws_mode and connection._buffer:
-                return connection
-            if connection._streaming_body and connection._buffer:
-                return connection
         return None
 
-    def event_write(self, sockets):
-        """Process sockets with write_event, send buffered data"""
-        for connection in list(self._waiting_connections):
-            if connection.socket in sockets:
-                connection.try_send()
-
-    def process_events(self, read_sockets, write_sockets):
-        """Process select results, returns loaded connection or None
-
-        This allows using external select with multiple servers/sockets:
-
-        Example:
-            server1 = HttpServer(port=80)
-            server2 = HttpServer(port=443, ssl_context=ctx)
-
-            read_all = server1.read_sockets + server2.read_sockets
-            write_all = server1.write_sockets + server2.write_sockets
-            r, w, _ = select.select(read_all, write_all, [], timeout)
-
-            client = server1.process_events(r, w) or server2.process_events(r, w)
-        """
-        pending = self._get_pending_connection()
-        if pending:
-            if pending._ws_mode:
-                if pending._ws_process_buffer():
-                    return pending
-            elif pending._handle_streaming_body():
-                return pending
-
-        if write_sockets:
-            self.event_write(write_sockets)
-        if read_sockets:
-            return self.event_read(read_sockets)
-        return None
+    def _owns(self, owner):
+        return owner is self or (
+            isinstance(owner, HttpConnection) and owner._server is self)
 
     def wait(self, timeout=1):
-        """Wait for new clients with specified timeout,
-        returns None or instance of HttpConnection with established connection"""
-        pending = self._get_pending_connection()
-        if pending:
-            if pending._ws_mode:
-                if pending._ws_process_buffer():
-                    return pending
-            elif pending._handle_streaming_body():
-                return pending
+        """Wait for socket activity, returns a loaded HttpConnection or None.
 
-        self.event_write(self.write_sockets)
+        On a shared selector only this server's sockets are serviced. A
+        returned connection is drained via next() on the following call.
+        """
+        if self._socket is None:
+            if timeout:
+                _time.sleep(timeout)
+            return None
+        resume = self._resume
+        self._resume = None
+        if resume is not None and resume.next():
+            self._resume = resume
+            return resume
         try:
-            read_sockets, write_sockets, _ = _select.select(
-                self.read_sockets, self.write_sockets, [], timeout)
+            events = self._selector.select(timeout)
         except (OSError, ValueError) as err:
-            # EBADF: socket closed concurrently
-            # ValueError: socket fileno() is -1 (closed)
-            # EINVAL (WinError 10022): invalid socket on Windows
+            # ValueError/EBADF: closed; EINVAL: invalid socket on Windows
             if isinstance(err, ValueError) or err.errno in (
                     errno.EBADF, errno.EINVAL):
                 return None
             raise
-        return self.process_events(read_sockets, write_sockets)
+        if not events:
+            return None  # cleanup is traffic-driven, see maintenance()
+        result = None
+        for key, mask in events:
+            if not self._owns(key.data):
+                continue
+            ready = key.data.handle_event(key.fileobj, mask)
+            if ready is not None:
+                result = ready
+                self._resume = ready
+                break
+        self.maintenance()
+        return result

@@ -849,5 +849,46 @@ class TestWebSocketLargeMessages(unittest.TestCase):
             sock.close()
 
 
+class TestWebSocketHandoffResume(unittest.TestCase):
+    """Regression: a non-event-mode WebSocket handoff must clear the server's
+    _resume reference. Otherwise the next wait() calls next() on a connection
+    now driven by the WebSocket object — racing its I/O thread and, in the
+    original bug, intermittently select()ing a stale socket."""
+
+    PORT = 9973
+
+    def test_resume_cleared_on_ws_handoff(self):
+        server = uhttp_server.HttpServer(port=self.PORT)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(('localhost', self.PORT))
+            # Send the upgrade request but do NOT read the 101 yet — the
+            # server only writes it inside accept_websocket() below.
+            sock.sendall(
+                b"GET /ws HTTP/1.1\r\nHost: localhost\r\n"
+                b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                b"Sec-WebSocket-Version: 13\r\n\r\n")
+
+            client = None
+            for _ in range(20):
+                client = server.wait(0.1)
+                if client:
+                    break
+            self.assertIsNotNone(client)
+            self.assertTrue(client.is_websocket_request)
+            # wait() returned it, so it is remembered for buffered-event draining
+            self.assertIs(server._resume, client)
+
+            ws = client.accept_websocket()  # non-event mode: hands off + returns
+            self.assertIsNotNone(ws)
+            # The handoff removed the connection from the server; _resume must
+            # no longer point at it, so the next wait() won't touch it.
+            self.assertIsNone(server._resume)
+        finally:
+            sock.close()
+            server.close()
+
+
 if __name__ == '__main__':
     unittest.main()

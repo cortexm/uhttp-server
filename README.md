@@ -47,6 +47,82 @@ while True:
 ```
 
 
+## Migrating from 2.x to 3.0
+
+3.0 replaces the internal `select.select()` loop with a
+[`selectors`](https://docs.python.org/3/library/selectors.html) selector that
+the server, its connections and its WebSockets **register themselves** in.
+Dispatch goes through the owner stored in `key.data`, so one loop can drive
+several servers, their connections and other subsystems (including
+[uhttp-client](https://github.com/cortexm/uhttp-client) 3.x) together.
+
+**Removed:** `read_sockets`, `write_sockets`, `process_events()`,
+`event_read()`, `event_write()` — on `HttpServer` and on `WebSocket`.
+
+`server.wait(timeout)` is unchanged, so single-server code needs no edits.
+
+### External loop
+
+```python
+# 2.x
+while True:
+    r, w, _ = select.select(
+        http.read_sockets + https.read_sockets,
+        http.write_sockets + https.write_sockets, [], 1.0)
+    client = http.process_events(r, w) or https.process_events(r, w)
+    if client:
+        serve(client)
+
+# 3.0
+selector = selectors.DefaultSelector()
+http = HttpServer(port=80, selector=selector)
+https = HttpServer(port=443, ssl_context=ctx, selector=selector)
+
+while True:
+    for key, mask in selector.select(1.0):
+        client = key.data.handle_event(key.fileobj, mask)
+        if isinstance(client, HttpConnection):
+            serve(client)
+            while client.next():   # drain events buffered from one recv
+                serve(client)
+    http.maintenance()
+    https.maintenance()
+```
+
+Three rules carry the whole migration:
+
+1. **`key.data.handle_event(key.fileobj, mask)`** replaces `process_events()`.
+   It returns the connection when a request/event is ready, otherwise `None`.
+   Anything you register yourself must expose the same method — register an
+   owner object, not a bare callback.
+2. **`while client.next():`** — one `recv()` can carry several WebSocket
+   frames or body chunks, and `select()` will not report them again because the
+   OS buffer is already drained. Drain them before blocking. `wait()` does this
+   for you.
+3. **`maintenance()` once per loop iteration** — keep-alive and header
+   timeouts have no event to ride on. `wait()` calls it for you.
+
+### WebSocket
+
+Non-event mode still returns a `WebSocket` with the same `wait()`,
+`read_buffer()`, `send()` and `is_closed`, but it is now a facade over the
+connection — so it honours `max_send_buffer_size` and `send()`/`ping()` return
+`False` when they cannot queue. To drive it from a shared loop, hand the
+selector to the upgrade:
+
+```python
+ws = client.accept_websocket(selector=selector)   # joins the shared loop
+ws = client.accept_websocket()                    # owns one, use ws.wait()
+```
+
+`wait()` refuses a shared selector: a blocking wait cannot service the other
+owners' ready keys.
+
+### Not yet on MicroPython
+
+`selectors` is not in the MicroPython standard library, so 3.x is CPython-only
+until a shim lands. Stay on 2.x on-device.
+
 ## SSL/HTTPS Support
 
 uHTTP supports SSL/TLS encryption for HTTPS connections on both CPython and MicroPython.
@@ -155,7 +231,7 @@ Run both HTTP and HTTPS servers to redirect HTTP traffic:
 
 ```python
 import ssl
-import select
+import selectors
 import uhttp.server
 
 # SSL context for HTTPS
@@ -165,29 +241,32 @@ context.load_cert_chain(
     keyfile='/etc/letsencrypt/live/example.com/privkey.pem'
 )
 
+# One shared selector drives both servers. On a ready key,
+# key.data.handle_event() dispatches to the owning server/connection.
+selector = selectors.DefaultSelector()
+
 # HTTP server (redirects)
-http_server = uhttp.server.HttpServer(port=80)
+http_server = uhttp.server.HttpServer(port=80, selector=selector)
 
 # HTTPS server (serves content)
-https_server = uhttp.server.HttpServer(port=443, ssl_context=context)
+https_server = uhttp.server.HttpServer(
+    port=443, ssl_context=context, selector=selector)
+
+def serve(client):
+    if client.is_secure:
+        client.respond({'message': 'Secure content'})   # HTTPS content
+    else:
+        client.respond_redirect(f"https://{client.host}{client.url}")  # redirect
 
 while True:
-    r, w, _ = select.select(
-        http_server.read_sockets + https_server.read_sockets,
-        http_server.write_sockets + https_server.write_sockets,
-        [], 1.0
-    )
-
-    # Redirect HTTP to HTTPS
-    http_client = http_server.process_events(r, w)
-    if http_client:
-        https_url = f"https://{http_client.host}{http_client.url}"
-        http_client.respond_redirect(https_url)
-
-    # Serve HTTPS content
-    https_client = https_server.process_events(r, w)
-    if https_client:
-        https_client.respond({'message': 'Secure content'})
+    for key, mask in selector.select(1.0):
+        client = key.data.handle_event(key.fileobj, mask)
+        if isinstance(client, uhttp.server.HttpConnection):
+            serve(client)
+            while client.next():   # drain events buffered from one recv (WS/stream)
+                serve(client)
+    http_server.maintenance()
+    https_server.maintenance()
 ```
 
 ### Testing SSL Locally
@@ -267,6 +346,7 @@ Parameters:
   - `file_chunk_size` - Chunk size in bytes for streaming file responses (default: 4KB)
   - `listen` - Listening socket backlog (default: 8)
   - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `remote_address` uses `X-Forwarded-For` header for connections from these IPs. When not set, `X-Forwarded-For` is ignored.
+  - `selector` - A `selectors.BaseSelector` to register sockets in (default: a `DefaultSelector` the server owns and closes). Pass the same instance to several servers (and register your own sockets in it) to drive them from one loop.
 
 #### Properties:
 
@@ -274,13 +354,9 @@ Parameters:
 
 - Server socket
 
-**`read_sockets(self)`**
+**`selector(self)`**
 
-- All sockets waiting for read, used for select
-
-**`write_sockets(self)`**
-
-- All sockets with data to send, used for select
+- The `selectors.BaseSelector` the server registers its sockets in. Read events from it and dispatch via `key.data.handle_event()` for a shared-selector loop across several servers / your own sockets (register those with an owner object exposing `handle_event(fileobj, mask)`). Pass `selector=` to the constructor to share one; `wait()` on a shared selector services only this server's sockets.
 
 **`is_secure(self)`**
 
@@ -292,21 +368,17 @@ Parameters:
 
 #### Methods:
 
-**`event_write(self, sockets)`**
-
-- Send buffered data for sockets in list. Called internally by `process_events()`.
-
-**`event_read(self, sockets)`**
-
-- Process sockets with read event, returns None or instance of HttpConnection with established connection.
-
-**`process_events(self, read_sockets, write_sockets)`**
-
-- Process select results, returns None or instance of HttpConnection with established connection.
-
 **`wait(self, timeout=1)`**
 
-- Wait for new clients with specified timeout, returns None or instance of HttpConnection with established connection.
+- Wait for socket activity with the given timeout, returns None or an `HttpConnection` with an established request. Single-server convenience backed by the server's own selector; internally accepts connections, flushes writes, and runs `maintenance()`.
+
+**`handle_event(self, fileobj, mask)`**
+
+- Owner dispatch for the server's listening socket (stored as `key.data`). Accepts a new connection and returns None. Used by a shared-selector loop. (Connections stored as `key.data` expose the same method; theirs returns the connection when a request is ready.)
+
+**`maintenance(self)`**
+
+- Closes idle / timed-out connections. `wait()` calls it after each active tick; call it once per loop iteration when driving a shared selector yourself.
 
 
 ### Class `HttpConnection`:
@@ -424,6 +496,14 @@ Parameters:
 **`process_request(self)`**
 
 - Process HTTP request when read event on client socket
+
+**`handle_event(self, fileobj, mask)`**
+
+- Owner dispatch for this connection (stored as `key.data`). Drives read/write for the given readiness `mask` and returns the connection when a request/event is ready, else None. Used by a shared-selector loop.
+
+**`next(self)`**
+
+- Process the next event already in the receive buffer, returning True while another event is ready on this same connection. One `recv()` can pull several WebSocket frames / body chunks that `select()` will not report again; call `next()` in a loop after handling an event to drain them. Returns False on a plain HTTP connection or after a non-event WebSocket handoff.
 
 **`respond(self, data=None, status=200, headers=None, cookies=None)`**
 
@@ -673,7 +753,12 @@ with requests.get('http://localhost:8080/export', stream=True) as r:
 
 uHTTP supports WebSocket connections (RFC 6455) in both event mode and non-event mode.
 
-**Important:** When using `process_events()` with external select loop, `event_mode=True` is required for WebSocket support.
+**Shared-selector loops:** both modes work. In event mode the connection stays
+the owner; in non-event mode pass the selector to the upgrade —
+`ws = client.accept_websocket(selector=sel)` — and the returned `WebSocket`
+registers itself as `key.data`, dispatching through `handle_event(fileobj, mask)`
+and `next()` like every other owner. Without a selector it owns one and you use
+its blocking `wait(timeout)`.
 
 **Security:** The server does not validate the `Origin` header during WebSocket upgrade. To prevent cross-site WebSocket hijacking, validate the `Origin` header in your application before calling `accept_websocket()`.
 

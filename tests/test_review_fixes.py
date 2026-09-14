@@ -421,7 +421,8 @@ class TestMicroPythonPortability(unittest.TestCase):
         # MicroPython: "'bytearray' object doesn't support item deletion".
         # Use `buf[:] = buf[n:]` instead - it shrinks in place and keeps
         # the object, verified on an ESP32-C6.
-        source = open(uhttp_server.__file__).read()
+        with open(uhttp_server.__file__) as handle:
+            source = handle.read()
         offenders = [
             line.strip() for line in source.splitlines()
             if re.search(r'\bdel\s+[\w.]+\[[^\]]*:', line)]

@@ -11,7 +11,6 @@ import socket
 import time
 import tempfile
 import os
-import select
 import shutil
 from uhttp import server as uhttp_server
 
@@ -63,11 +62,9 @@ class TestRespondFileRace(unittest.TestCase):
             # Process until we get a loaded connection
             connection = None
             for _ in range(10):
-                r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-                if r:
-                    connection = server.event_read(r)
-                    if connection:
-                        break
+                connection = server.wait(0.1)
+                if connection:
+                    break
 
             self.assertIsNotNone(connection, "Should have received request")
             self.assertTrue(connection.is_loaded, "Connection should be loaded")
@@ -116,11 +113,9 @@ class TestRespondFileRace(unittest.TestCase):
             # Get the connection
             connection = None
             for _ in range(10):
-                r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-                if r:
-                    connection = server.event_read(r)
-                    if connection:
-                        break
+                connection = server.wait(0.1)
+                if connection:
+                    break
 
             self.assertIsNotNone(connection)
 
@@ -136,23 +131,17 @@ class TestRespondFileRace(unittest.TestCase):
 
             # Try to process again - should NOT return the same connection
             # because response is still pending
-            r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-            if r:
-                # This is where the bug manifests:
-                # process_request() returns True because is_loaded is True
-                # But _response_started is also True!
-                new_connection = server.event_read(r)
-
-                if new_connection is connection:
-                    # Bug! We got the same connection while response is pending
-                    # Now if we try to respond, we get "Response already sent"
-                    with self.assertRaises(uhttp_server.HttpError) as ctx:
-                        new_connection.respond("This should fail")
-                    self.assertIn("already sent", str(ctx.exception))
-                    self.fail(
-                        "Bug reproduced: server returned connection while "
-                        "response was still pending"
-                    )
+            new_connection = server.wait(0.1)
+            if new_connection is connection:
+                # Bug! We got the same connection while response is pending
+                # Now if we try to respond, we get "Response already sent"
+                with self.assertRaises(uhttp_server.HttpError) as ctx:
+                    new_connection.respond("This should fail")
+                self.assertIn("already sent", str(ctx.exception))
+                self.fail(
+                    "Bug reproduced: server returned connection while "
+                    "response was still pending"
+                )
 
         finally:
             client_sock.close()

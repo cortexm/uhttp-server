@@ -8,7 +8,6 @@ the keep-alive timeout should not interrupt it with a 408 response.
 import unittest
 import socket
 import time
-import select
 import tempfile
 import os
 from uhttp import server as uhttp_server
@@ -18,13 +17,14 @@ class TestTimeoutDuringResponse(unittest.TestCase):
     """Test that _cleanup_idle_connections skips connections with _response_started"""
 
     PORT = 9998
+    FILE_SIZE = 200_000
 
     def test_no_408_while_response_in_progress(self):
         """Connection streaming file response should not get 408 timeout"""
         temp_dir = tempfile.mkdtemp()
         large_file = os.path.join(temp_dir, 'large.bin')
         with open(large_file, 'wb') as f:
-            f.write(b'X' * 200_000)
+            f.write(b'X' * self.FILE_SIZE)
 
         server = uhttp_server.HttpServer(
             port=self.PORT, keep_alive_timeout=0.3, file_chunk_size=512)
@@ -40,11 +40,9 @@ class TestTimeoutDuringResponse(unittest.TestCase):
 
             connection = None
             for _ in range(10):
-                r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-                if r:
-                    connection = server.event_read(r)
-                    if connection:
-                        break
+                connection = server.wait(0.1)
+                if connection:
+                    break
             self.assertIsNotNone(connection)
 
             connection.respond_file(large_file)
@@ -58,30 +56,27 @@ class TestTimeoutDuringResponse(unittest.TestCase):
             trigger_sock.connect(('localhost', self.PORT))
             time.sleep(0.1)
 
-            r, _, _ = select.select(server.read_sockets, [], [], 0.2)
-            if r:
-                server.event_read(r)
+            # wait() accepts the trigger (activity) and runs maintenance,
+            # which must skip the streaming connection (_response_started).
+            server.wait(0.2)
 
             self.assertIsNotNone(
                 connection.socket,
                 "Connection should not be closed while response is in progress")
 
-            # Drain the response
+            # Drain the response (wait() flushes the write-ready connection)
             response = b""
-            for _ in range(200):
-                w = server.write_sockets
-                if w:
-                    _, ww, _ = select.select([], w, [], 0.1)
-                    if ww:
-                        server.event_write(ww)
+            deadline = time.time() + 5
+            while (connection.has_data_to_send or len(response) < self.FILE_SIZE) \
+                    and time.time() < deadline:
+                server.wait(0.05)
                 try:
                     chunk = client_sock.recv(65536)
-                    if chunk:
-                        response += chunk
-                    else:
+                    if not chunk:
                         break
+                    response += chunk
                 except BlockingIOError:
-                    continue
+                    pass
 
             self.assertIn(b'200 OK', response)
             self.assertIn(b'X' * 100, response)
@@ -115,23 +110,18 @@ class TestTimeoutDuringResponse(unittest.TestCase):
             time.sleep(0.1)
 
             # Process the request and respond
+            connection = None
             for _ in range(10):
-                r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-                if r:
-                    connection = server.event_read(r)
-                    if connection:
-                        connection.respond('ok')
-                        break
+                connection = server.wait(0.1)
+                if connection:
+                    connection.respond('ok')
+                    break
+            self.assertIsNotNone(connection)
 
             # Flush send buffer
-            for _ in range(20):
-                w = server.write_sockets
-                if w:
-                    _, ww, _ = select.select([], w, [], 0.1)
-                    if ww:
-                        server.event_write(ww)
-                else:
-                    break
+            deadline = time.time() + 2
+            while connection.has_data_to_send and time.time() < deadline:
+                server.wait(0.05)
 
             # Drain the first response
             try:
@@ -148,19 +138,14 @@ class TestTimeoutDuringResponse(unittest.TestCase):
             trigger_sock.connect(('localhost', self.PORT + 1))
             time.sleep(0.1)
 
-            r, _, _ = select.select(server.read_sockets, [], [], 0.2)
-            if r:
-                server.event_read(r)
+            # wait() accepts the trigger (activity) and runs maintenance,
+            # which 408s the idle keep-alive connection.
+            server.wait(0.2)
 
             # Flush 408 response
-            for _ in range(20):
-                w = server.write_sockets
-                if w:
-                    _, ww, _ = select.select([], w, [], 0.1)
-                    if ww:
-                        server.event_write(ww)
-                else:
-                    break
+            deadline = time.time() + 2
+            while connection.has_data_to_send and time.time() < deadline:
+                server.wait(0.05)
 
             # Read the 408 response
             time.sleep(0.1)

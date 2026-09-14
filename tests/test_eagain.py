@@ -6,7 +6,6 @@ import unittest
 import socket
 import errno
 import time
-import select
 import sys
 from uhttp import server as uhttp_server
 
@@ -30,13 +29,9 @@ class TestEAGAIN(unittest.TestCase):
             client_sock.connect(('localhost', self.PORT))
             client_sock.setblocking(False)
 
-            # Accept connection on server
+            # Accept connection on server (wait() returns None: no request yet)
             time.sleep(0.1)
-            r, _, _ = select.select(server.read_sockets, [], [], 0.5)
-            self.assertIn(server.socket, r)
-
-            # This should accept the connection
-            server.event_read(r)
+            server.wait(0.5)
 
             # Now there's a connection but no data sent
             # Try to read - should get EAGAIN (handled internally)
@@ -80,11 +75,9 @@ class TestEAGAIN(unittest.TestCase):
             # Process request
             connection = None
             for _ in range(10):
-                r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-                if r:
-                    connection = server.event_read(r)
-                    if connection:
-                        break
+                connection = server.wait(0.1)
+                if connection:
+                    break
 
             self.assertIsNotNone(connection)
 
@@ -125,9 +118,8 @@ class TestEAGAIN(unittest.TestCase):
 
             time.sleep(0.1)
 
-            # Accept connection
-            r, _, _ = select.select(server.read_sockets, [], [], 0.5)
-            server.event_read(r)
+            # Accept connection (wait() returns None: no request yet)
+            server.wait(0.5)
 
             connection = server._waiting_connections[0]
 
@@ -136,22 +128,18 @@ class TestEAGAIN(unittest.TestCase):
             time.sleep(0.05)
 
             # Try to process - should get partial data, EAGAIN on second read
-            r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-            if r:
-                result = server.event_read(r)
-                # Should not be loaded yet (incomplete headers)
-                self.assertIsNone(result)
+            result = server.wait(0.1)
+            # Should not be loaded yet (incomplete headers)
+            self.assertIsNone(result)
 
             # Send rest of headers
             client_sock.send(b"Host: localhost\r\n\r\n")
             time.sleep(0.05)
 
             # Now should complete
-            r, _, _ = select.select(server.read_sockets, [], [], 0.1)
-            if r:
-                result = server.event_read(r)
-                self.assertIsNotNone(result)
-                self.assertTrue(result.is_loaded)
+            result = server.wait(0.1)
+            self.assertIsNotNone(result)
+            self.assertTrue(result.is_loaded)
 
         finally:
             client_sock.close()

@@ -1,11 +1,13 @@
 """Example: Combining HttpServer and HttpClient
 
-This example shows how to use both server and client together
-in a single select loop - useful for proxies, API gateways, etc.
+Both register their sockets in one selectors.BaseSelector, so a single
+loop drives them together - useful for proxies, API gateways, etc.
+On a ready key, key.data.handle_event() dispatches to the owning
+server / connection / client.
 """
 
-import select
-from uhttp.server import HttpServer
+import selectors
+from uhttp.server import HttpServer, HttpConnection
 from uhttp.client import HttpClient
 
 
@@ -17,100 +19,95 @@ def example_simple_proxy():
     print("  curl http://localhost:8080/post -d '{\"test\":1}'")
     print()
 
-    # Local server
-    server = HttpServer(port=8080)
+    # One selector drives the server and the backend client
+    selector = selectors.DefaultSelector()
+    server = HttpServer(port=8080, selector=selector)
+    backend = HttpClient('httpbin.org', port=80, selector=selector)
 
-    # Backend client
-    backend = HttpClient('httpbin.org', port=80)
+    # A client handles one request at a time, so overlapping incoming
+    # requests have to queue: forwarding straight from the event would
+    # raise "Request already in progress" and kill the loop.
+    waiting = []      # connections not forwarded yet
+    forwarded = None  # the connection the backend is answering
 
-    # Track pending requests: {client_connection: backend_request_started}
-    pending = {}
+    def forward_next():
+        if forwarded is not None or not waiting:
+            return None
+        client = waiting.pop(0)
+        print(f"-> Forwarding: {client.method} {client.path}")
+        is_json = client.content_type == 'application/json'
+        backend.request(
+            client.method, client.path, query=client.query,
+            json=client.data if is_json else None,
+            data=None if is_json else client.data)
+        return client
 
     print("Proxy running... (Ctrl+C to stop)")
 
     try:
         while True:
-            # Collect all sockets
-            read_socks = server.read_sockets + backend.read_sockets
-            write_socks = server.write_sockets + backend.write_sockets
+            for key, mask in selector.select(1.0):
+                ready = key.data.handle_event(key.fileobj, mask)
+                if ready is None:
+                    continue
 
-            r, w, _ = select.select(read_socks, write_socks, [], 1.0)
+                if isinstance(ready, HttpConnection):
+                    waiting.append(ready)
 
-            # Process server events (incoming requests)
-            incoming = server.process_events(r, w)
-            if incoming:
-                print(f"-> Incoming: {incoming.method} {incoming.path}")
+                elif ready is backend and forwarded is not None:
+                    response = backend.response
+                    print(f"<- Backend response: {response.status}")
+                    forwarded.respond(
+                        data=response.data,
+                        status=response.status,
+                        headers={'content-type': response.content_type})
+                    forwarded = None
 
-                # Forward to backend (async is default)
-                backend.request(
-                    incoming.method,
-                    incoming.path,
-                    query=incoming.query,
-                    json=incoming.data if incoming.content_type == 'application/json' else None,
-                    data=incoming.data if incoming.content_type != 'application/json' else None
-                )
-                pending[id(backend)] = incoming
+            if forwarded is None:
+                forwarded = forward_next()
 
-            # Process backend events (responses from backend)
-            backend_response = backend.process_events(r, w)
-            if backend_response and pending:
-                # Get the original client request
-                client_conn = pending.pop(id(backend), None)
-                if client_conn:
-                    print(f"<- Backend response: {backend_response.status}")
-
-                    # Forward response to client
-                    client_conn.respond(
-                        data=backend_response.data,
-                        status=backend_response.status,
-                        headers={'content-type': backend_response.content_type}
-                    )
+            server.maintenance()
+            backend.maintenance()   # a hung backend has no event to time out
 
     except KeyboardInterrupt:
         print("\nStopping proxy...")
 
-    server.close()
     backend.close()
+    server.close()
+    selector.close()
 
 
 def example_api_aggregator():
     """Aggregate data from multiple APIs in parallel"""
     print("=== API Aggregator ===")
 
-    # Multiple backend clients (all to httpbin for demo)
+    # All backends share one selector, so one loop collects every response
+    selector = selectors.DefaultSelector()
     backends = {
-        'api1': HttpClient('httpbin.org', port=80),
-        'api2': HttpClient('httpbin.org', port=80),
-        'api3': HttpClient('httpbin.org', port=80),
+        name: HttpClient('httpbin.org', port=80, selector=selector)
+        for name in ('api1', 'api2', 'api3')
     }
 
-    # Start parallel requests (async is default)
-    backends['api1'].get('/get', query={'source': 'api1'})
-    backends['api2'].get('/get', query={'source': 'api2'})
-    backends['api3'].get('/get', query={'source': 'api3'})
+    for name, client in backends.items():
+        client.get('/get', query={'source': name})
 
     results = {}
-
-    # Wait for all responses
     while len(results) < len(backends):
-        read_socks = []
-        write_socks = []
-        for client in backends.values():
-            read_socks.extend(client.read_sockets)
-            write_socks.extend(client.write_sockets)
-
-        r, w, _ = select.select(read_socks, write_socks, [], 10.0)
-
-        for name, client in backends.items():
-            if name not in results:
-                resp = client.process_events(r, w)
-                if resp:
-                    results[name] = resp.json()
+        for key, mask in selector.select(10.0):
+            ready = key.data.handle_event(key.fileobj, mask)
+            if ready is None:
+                continue
+            for name, client in backends.items():
+                if ready is client:
+                    results[name] = client.response.json()
                     print(f"Got {name} data: {results[name]['args']}")
+                    break
+        for client in backends.values():
+            client.maintenance()
 
-    # Cleanup
     for client in backends.values():
         client.close()
+    selector.close()
 
     print(f"\nAll {len(results)} API calls completed in parallel")
 

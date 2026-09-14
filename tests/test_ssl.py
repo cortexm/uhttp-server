@@ -10,6 +10,7 @@ import threading
 import json
 import subprocess
 import os
+import selectors
 from uhttp import server as uhttp_server
 
 
@@ -266,45 +267,40 @@ class TestHTTPtoHTTPSRedirect(unittest.TestCase):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile='cert.pem', keyfile='key.pem')
 
+        # Both servers share one selector — the v3 multi-server pattern.
+        cls.selector = selectors.DefaultSelector()
+
         # HTTP server (for redirects)
-        cls.http_server = uhttp_server.HttpServer(port=cls.HTTP_PORT)
+        cls.http_server = uhttp_server.HttpServer(
+            port=cls.HTTP_PORT, selector=cls.selector)
 
         # HTTPS server (for actual content)
         cls.https_server = uhttp_server.HttpServer(
             port=cls.HTTPS_PORT,
-            ssl_context=context
+            ssl_context=context,
+            selector=cls.selector,
         )
 
+        def serve(client):
+            # Distinguish the two servers by their TLS state.
+            if client.is_secure:
+                client.respond({'message': 'Secure content', 'secure': True})
+            else:
+                client.respond_redirect(
+                    f"https://localhost:{cls.HTTPS_PORT}{client.url}")
+
         def run_servers():
-            import select
             try:
                 while cls.http_server and cls.https_server:
-                    read_sockets = (cls.http_server.read_sockets +
-                                    cls.https_server.read_sockets)
-                    write_sockets = (cls.http_server.write_sockets +
-                                     cls.https_server.write_sockets)
-
-                    r, w, x = select.select(read_sockets, write_sockets, [], 0.5)
-
-                    if w:
-                        cls.http_server.event_write(w)
-                        cls.https_server.event_write(w)
-
-                    if r:
-                        # HTTP server - redirect to HTTPS
-                        http_client = cls.http_server.event_read(r)
-                        if http_client:
-                            https_url = (f"https://localhost:{cls.HTTPS_PORT}"
-                                         f"{http_client.url}")
-                            http_client.respond_redirect(https_url)
-
-                        # HTTPS server - serve content
-                        https_client = cls.https_server.event_read(r)
-                        if https_client:
-                            https_client.respond({
-                                'message': 'Secure content',
-                                'secure': https_client.is_secure
-                            })
+                    for key, mask in cls.selector.select(0.5):
+                        client = key.data.handle_event(key.fileobj, mask)
+                        if not isinstance(client, uhttp_server.HttpConnection):
+                            continue
+                        serve(client)
+                        while client.next():   # drain buffered events
+                            serve(client)
+                    cls.http_server.maintenance()
+                    cls.https_server.maintenance()
             except Exception:
                 pass
 
@@ -321,6 +317,9 @@ class TestHTTPtoHTTPSRedirect(unittest.TestCase):
         if cls.https_server:
             cls.https_server.close()
             cls.https_server = None
+        if getattr(cls, 'selector', None):
+            cls.selector.close()
+            cls.selector = None
 
     def test_http_redirect_to_https(self):
         """Test that HTTP server redirects to HTTPS"""
