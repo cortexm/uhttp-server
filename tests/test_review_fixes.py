@@ -298,3 +298,90 @@ class TestWebSocketSendCap(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SlowSocket:
+    """Accepts at most `limit` bytes per send, forcing partial writes."""
+
+    def __init__(self, sock, limit=1024):
+        self._sock = sock
+        self._limit = limit
+
+    def send(self, data):
+        return self._sock.send(bytes(data)[:self._limit])
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+class TestSendBufferDoesNotReallocate(unittest.TestCase):
+    """A partial send must consume the buffer, not rebuild it."""
+
+    PORT = 9712
+
+    def test_partial_sends_reuse_one_buffer(self):
+        payload = b'y' * 60_000
+        server = uhttp_server.HttpServer(port=self.PORT)
+        sock = connect(self.PORT)
+        try:
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            client = drive(server)
+            held = client._send_buffer          # before anything is queued
+            client._socket = SlowSocket(client._socket)
+            client.respond(payload)
+
+            received = bytearray()
+            sock.settimeout(0.2)
+            deadline = time.time() + 20
+            while len(received) < len(payload) and time.time() < deadline:
+                server.wait(0.01)
+                try:
+                    chunk = sock.recv(65536)
+                except OSError:
+                    continue
+                if not chunk:
+                    break
+                received.extend(chunk)
+
+            body = len(received) - received.index(b'\r\n\r\n') - 4
+            self.assertEqual(body, len(payload), "body was truncated")
+            self.assertIs(
+                client._send_buffer, held,
+                "the send buffer object was rebuilt on a partial send")
+        finally:
+            sock.close()
+            server.close()
+
+
+class TestRespondLargerThanTheCap(unittest.TestCase):
+    """respond() writes header+body as one initial write, so the cap
+    must not reject a body bigger than it."""
+
+    PORT = 9713
+
+    def test_body_over_the_cap_is_accepted(self):
+        payload = b'z' * 50_000
+        server = uhttp_server.HttpServer(
+            port=self.PORT, max_send_buffer_size=4096)
+        sock = connect(self.PORT)
+        try:
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            client = drive(server)
+            client.respond(payload)  # must not raise
+            received = bytearray()
+            sock.settimeout(0.2)
+            deadline = time.time() + 10
+            while len(received) < len(payload) and time.time() < deadline:
+                server.wait(0.01)
+                try:
+                    chunk = sock.recv(65536)
+                except OSError:
+                    continue
+                if not chunk:
+                    break
+                received.extend(chunk)
+            self.assertEqual(
+                len(received) - received.index(b'\r\n\r\n') - 4, len(payload))
+        finally:
+            sock.close()
+            server.close()

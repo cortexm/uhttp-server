@@ -719,7 +719,7 @@ class WebSocket(_WsFrameMixin):
             if sent is None:
                 return
             if sent > 0:
-                self._send_buffer = self._send_buffer[sent:]
+                del self._send_buffer[:sent]
             else:
                 return
 
@@ -758,6 +758,7 @@ class HttpConnection(_WsFrameMixin):
         self._socket = sock
         self._buffer = bytearray()
         self._send_buffer = bytearray()
+        self._send_offset = 0
         self._rx_bytes_counter = 0
         self._method = None
         self._url = None
@@ -807,6 +808,7 @@ class HttpConnection(_WsFrameMixin):
         self._request_timeout = kwargs.get(
             'request_timeout', REQUEST_TIMEOUT)
         self._request_start = None
+        self._headers_scanned = 0
 
     def __del__(self):
         self.close()
@@ -958,12 +960,12 @@ class HttpConnection(_WsFrameMixin):
     @property
     def has_data_to_send(self):
         """True when there is data waiting to be sent or file being streamed"""
-        return len(self._send_buffer) > 0 or self._file_handle is not None
+        return self.send_buffer_size > 0 or self._file_handle is not None
 
     @property
     def send_buffer_size(self):
         """Size of pending send buffer in bytes"""
-        return len(self._send_buffer)
+        return len(self._send_buffer) - self._send_offset
 
     @property
     def event(self):
@@ -1118,8 +1120,7 @@ class HttpConnection(_WsFrameMixin):
 
     def _process_headers(self, header_lines):
         self._headers = {}
-        while header_lines:
-            line = header_lines.pop(0)
+        for line in header_lines:
             if not line:
                 break
             if self._method is None:
@@ -1164,37 +1165,46 @@ class HttpConnection(_WsFrameMixin):
         if self._request_start is None:
             self._request_start = _time.time()
         self._recv_to_buffer(self._max_headers_length)
+        # Resume the scan a few bytes back so a delimiter split across two
+        # reads is still found, instead of rescanning the whole buffer.
+        start = max(0, self._headers_scanned - 3)
         for delimiter in HEADERS_DELIMITERS:
-            if delimiter in self._buffer:
-                end_index = self._buffer.index(delimiter) + len(delimiter)
+            found = self._buffer.find(delimiter, start)
+            if found >= 0:
+                end_index = found + len(delimiter)
                 header_lines = self._buffer[:end_index].splitlines()
                 self._buffer = self._buffer[end_index:]
+                self._headers_scanned = 0
                 self._process_headers(header_lines)
                 return
+        self._headers_scanned = len(self._buffer)
         if len(self._buffer) >= self._max_headers_length:
             raise HttpErrorWithResponse(
                 431,
                 f"Headers too large: {len(self._buffer)} bytes (max {self._max_headers_length})")
 
-    def _send(self, data):
+    def _send(self, *parts):
         """Add data to send buffer for async sending.
 
         Backpressure: if buffer already holds pending data and adding
         more would exceed _max_send_buffer_size, raises OSError. A
         single large initial write into an empty buffer is always
-        accepted (typical respond(data=...) case). Slow consumers that
-        accumulate buffered data will trip the cap and the streaming
-        send_*() callers convert it to a False return.
+        accepted (typical respond(data=...) case) - parts are measured
+        together, so a header plus an oversized body still counts as one.
+        Slow consumers that accumulate buffered data will trip the cap and
+        the streaming send_*() callers convert it to a False return.
         """
         if self._socket is None:
             return
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-        if (self._send_buffer
-                and len(self._send_buffer) + len(data)
-                > self._max_send_buffer_size):
+        parts = [
+            part.encode('utf-8') if isinstance(part, str) else part
+            for part in parts]
+        pending = self.send_buffer_size
+        if pending and pending + sum(
+                len(part) for part in parts) > self._max_send_buffer_size:
             raise OSError("Send buffer overflow")
-        self._send_buffer.extend(data)
+        for part in parts:
+            self._send_buffer.extend(part)
         self.try_send()
 
     def _send_100_continue(self):
@@ -1218,7 +1228,7 @@ class HttpConnection(_WsFrameMixin):
         Returns False if error occurred and connection was closed."""
         if not self._file_handle:
             return True
-        if len(self._send_buffer) >= self._file_chunk_size:
+        if self.send_buffer_size >= self._file_chunk_size:
             return True
         try:
             chunk = self._file_handle.read(self._file_chunk_size)
@@ -1232,19 +1242,36 @@ class HttpConnection(_WsFrameMixin):
             return False
         return True
 
+    def _consume_sent(self, sent):
+        """Drop sent bytes without rebuilding the buffer.
+
+        Compacts only once the consumed prefix outgrows the remainder, so
+        draining a large response copies O(size) in total instead of
+        reallocating the whole remainder on every partial send.
+        """
+        self._send_offset += sent
+        remaining = len(self._send_buffer) - self._send_offset
+        if not remaining:
+            del self._send_buffer[:]
+            self._send_offset = 0
+        elif self._send_offset >= remaining:
+            del self._send_buffer[:self._send_offset]
+            self._send_offset = 0
+
     def _flush_send_buffer(self):
         """Try to send data from buffer.
         Returns True if buffer is empty."""
-        if not self._send_buffer:
+        if not self.send_buffer_size:
             return True
         try:
-            sent = self._socket.send(self._send_buffer)
+            sent = self._socket.send(
+                memoryview(self._send_buffer)[self._send_offset:])
             # MicroPython SSL may return None when buffer full
             if sent is None:
                 return False
             if sent > 0:
-                self._send_buffer = self._send_buffer[sent:]
-            return len(self._send_buffer) == 0
+                self._consume_sent(sent)
+            return self.send_buffer_size == 0
         except OSError as err:
             if err.errno == errno.EAGAIN:
                 return False
@@ -1332,6 +1359,7 @@ class HttpConnection(_WsFrameMixin):
         self._to_file = None
         self._expect_continue = False
         self._request_start = None
+        self._headers_scanned = 0
         self.update_activity()
 
     def close(self):
@@ -1348,6 +1376,7 @@ class HttpConnection(_WsFrameMixin):
                 pass
             self._socket = None
             self._send_buffer = bytearray()
+            self._send_offset = 0
 
     def headers_get(self, key, default=None):
         """Return value from headers by key, or default if key not found"""
@@ -1678,8 +1707,7 @@ class HttpConnection(_WsFrameMixin):
         header = self._build_response_header(status, headers=headers, cookies=cookies)
         try:
             if data is not None:
-                header_bytes = header.encode('utf-8') if isinstance(header, str) else header
-                self._send(header_bytes + data)
+                self._send(header, data)
             else:
                 self._send(header)
             if not self.has_data_to_send:
