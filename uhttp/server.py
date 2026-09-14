@@ -53,6 +53,8 @@ EXPECT_100_CONTINUE = '100-continue'
 UPGRADE = 'upgrade'
 SEC_WEBSOCKET_KEY = 'sec-websocket-key'
 SEC_WEBSOCKET_ACCEPT = 'Sec-WebSocket-Accept'
+SEC_WEBSOCKET_VERSION = 'sec-websocket-version'
+WS_VERSION = '13'
 CONTENT_TYPE_MAP = {
     'html': CONTENT_TYPE_HTML_UTF8,
     'htm': CONTENT_TYPE_HTML_UTF8,
@@ -535,13 +537,10 @@ class _WsFrameMixin:
                 self._ws_protocol_error("control frame too large")
             if not self._ws_frame_fin:
                 self._ws_protocol_error("control frame must not be fragmented")
-        if masked:
-            if len(buf) < offset + 4:
-                return False
-            self._ws_frame_mask = bytes(buf[offset:offset + 4])
-            offset += 4
-        else:
-            self._ws_frame_mask = None
+        if len(buf) < offset + 4:
+            return False
+        self._ws_frame_mask = bytes(buf[offset:offset + 4])
+        offset += 4
         self._buffer = self._buffer[offset:]
         self._ws_frame_remaining = length
         self._ws_frame_mask_offset = 0
@@ -571,6 +570,7 @@ class WebSocket(_WsFrameMixin):
         self._connection = connection
         self._closed = False
         self._max_ws_message_length = connection._max_ws_message_length
+        self._max_send_buffer_size = connection._max_send_buffer_size
         self._chunk_size = connection._file_chunk_size
         self._event = None
         super().__init__()
@@ -646,37 +646,57 @@ class WebSocket(_WsFrameMixin):
 
     def send(self, data):
         """Send WebSocket frame.
-        str -> text frame, bytes -> binary frame."""
+        str -> text frame, bytes -> binary frame.
+
+        Returns False if the socket is closed or the send buffer cap was
+        hit (slow consumer)."""
         if self._closed:
-            return
+            return False
         if isinstance(data, str):
-            self._ws_do_send(_ws_build_frame(
-                WS_OPCODE_TEXT, data.encode('utf-8')))
+            frame = _ws_build_frame(WS_OPCODE_TEXT, data.encode('utf-8'))
         else:
-            self._ws_do_send(_ws_build_frame(WS_OPCODE_BINARY, data))
+            frame = _ws_build_frame(WS_OPCODE_BINARY, data)
+        return self._try_ws_send(frame)
 
     def ping(self, data=b''):
-        """Send ping frame"""
+        """Send ping frame. Returns False if it could not be queued."""
         if self._closed:
-            return
+            return False
         if isinstance(data, str):
             data = data.encode('utf-8')
-        self._ws_do_send(_ws_build_frame(WS_OPCODE_PING, data))
+        return self._try_ws_send(_ws_build_frame(WS_OPCODE_PING, data))
 
     def close(self, code=1000, reason=''):
         """Close WebSocket connection"""
         if self._closed:
-            return
+            return False
         payload = bytearray()
         payload.append((code >> 8) & 0xFF)
         payload.append(code & 0xFF)
         if reason:
             payload.extend(reason.encode('utf-8'))
-        self._ws_do_send(_ws_build_frame(WS_OPCODE_CLOSE, bytes(payload)))
+        sent = self._try_ws_send(_ws_build_frame(
+            WS_OPCODE_CLOSE, bytes(payload)))
         self._ws_on_close()
+        return sent
+
+    def _try_ws_send(self, frame):
+        try:
+            self._ws_do_send(frame)
+        except OSError:
+            return False
+        return True
 
     def _ws_do_send(self, data):
-        """Add data to send buffer and try to flush"""
+        """Add data to send buffer and try to flush.
+
+        Raises OSError when the buffer cap is hit, so a dead consumer
+        cannot grow it without limit (same contract as HttpConnection).
+        """
+        if (self._send_buffer
+                and len(self._send_buffer) + len(data)
+                > self._max_send_buffer_size):
+            raise OSError("Send buffer overflow")
         self._send_buffer.extend(data)
         self._try_flush_send()
 
@@ -921,7 +941,9 @@ class HttpConnection(_WsFrameMixin):
         """True when request is fully loaded and ready for response"""
         if self._response_started:
             return False
-        return self._method and (not self.content_length or self._data_loaded)
+        return bool(
+            self._method
+            and (not self.content_length or self._data_loaded))
 
     @property
     def is_timed_out(self):
@@ -996,7 +1018,7 @@ class HttpConnection(_WsFrameMixin):
 
     @property
     def ws_message(self):
-        """Last received WebSocket message (str for text, bytes for binary)"""
+        """Ping/close payload of the current event (EVENT_WS_PING/CLOSE)"""
         return self._ws_message
 
     def headers_get_attribute(self, key, default=None):
@@ -1076,10 +1098,10 @@ class HttpConnection(_WsFrameMixin):
         if len(self._buffer) > self.content_length:
             raise HttpErrorWithResponse(400, "Unexpected data after body")
 
-        content_type_parts = parse_header_parameters(self.content_type)
-        if CONTENT_TYPE_XFORMDATA in content_type_parts:
+        content_type = self.content_type.split(';')[0].strip().lower()
+        if content_type == CONTENT_TYPE_XFORMDATA:
             self._data = parse_query(self._buffer)
-        elif CONTENT_TYPE_JSON in content_type_parts:
+        elif content_type == CONTENT_TYPE_JSON:
             try:
                 self._data = _json.loads(self._buffer)
             except (ValueError, RuntimeError) as err:
@@ -1103,11 +1125,17 @@ class HttpConnection(_WsFrameMixin):
             if self._method is None:
                 self._parse_http_request(line)
             else:
+                if line[:1] in (b' ', b'\t'):
+                    raise HttpErrorWithResponse(
+                        400, "Obsolete header line folding is not supported")
                 key, val = parse_header_line(line)
                 # RFC 7230: reject duplicate Content-Length or Host
                 if key in (CONTENT_LENGTH, HOST) and key in self._headers:
                     raise HttpErrorWithResponse(
                         400, f"Duplicate {key} header")
+                if key in self._headers:
+                    # RFC 7230: repeated field lines combine with a comma
+                    val = self._headers[key] + ', ' + val
                 self._headers[key] = val
 
         # Reject Transfer-Encoding (chunked not supported)
@@ -1178,7 +1206,7 @@ class HttpConnection(_WsFrameMixin):
 
     def _close_file_handle(self):
         """Close file handle safely"""
-        if self._file_handle:
+        if getattr(self, '_file_handle', None):
             try:
                 self._file_handle.close()
             except OSError:
@@ -1307,11 +1335,13 @@ class HttpConnection(_WsFrameMixin):
         self.update_activity()
 
     def close(self):
-        """Close connection"""
+        """Close connection (safe on a partially built instance)"""
         self._close_file_handle()
         self._close_body_file(delete=True)
-        self._server.remove_connection(self)
-        if self._socket:
+        server = getattr(self, '_server', None)
+        if server is not None:
+            server.remove_connection(self)
+        if getattr(self, '_socket', None):
             try:
                 self._socket.close()
             except OSError:
@@ -1327,7 +1357,7 @@ class HttpConnection(_WsFrameMixin):
         """Process HTTP request when read event on client socket"""
         if self._socket is None:
             return None
-        if self._is_streaming:
+        if self._is_streaming or self._response_started:
             try:
                 self._probe_streaming_close()
             except ClientError:
@@ -1369,7 +1399,7 @@ class HttpConnection(_WsFrameMixin):
                 self._ws_mode = False
                 return True
 
-        if self._is_streaming:
+        if self._is_streaming or self._response_started:
             try:
                 self._probe_streaming_close()
             except ClientError:
@@ -1449,6 +1479,11 @@ class HttpConnection(_WsFrameMixin):
 
         # Check if body is complete
         total = self._bytes_received + len(self._buffer)
+        if self.content_length and total > self.content_length:
+            self._close_body_file(delete=True)
+            self._error = "Unexpected data after body"
+            self._event = EVENT_ERROR
+            return True
         if self.content_length and total >= self.content_length:
             self._close_body_file()  # Close file before EVENT_COMPLETE
             self._body_complete = True
@@ -1889,6 +1924,12 @@ class HttpConnection(_WsFrameMixin):
         """
         if not self.is_websocket_request:
             raise HttpError("Not a WebSocket upgrade request")
+        if self._method != 'GET':
+            raise HttpErrorWithResponse(
+                400, "WebSocket upgrade requires GET")
+        if self.headers_get_attribute(SEC_WEBSOCKET_VERSION) != WS_VERSION:
+            raise HttpErrorWithResponse(
+                426, f"Unsupported WebSocket version, need {WS_VERSION}")
         key = self.headers_get_attribute(SEC_WEBSOCKET_KEY)
         if not key:
             raise HttpErrorWithResponse(400, "Missing Sec-WebSocket-Key")
@@ -2128,7 +2169,7 @@ class HttpServer():
                 return
 
         connection = HttpConnection(self, cl_socket, addr, **self._kwargs)
-        while len(self._waiting_connections) > self._max_clients:
+        while len(self._waiting_connections) >= self._max_clients:
             connection_to_remove = self._waiting_connections.pop(0)
             if connection_to_remove._response_started:
                 # Already responding (e.g., multipart stream) - just close
