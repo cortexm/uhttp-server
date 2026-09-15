@@ -1289,12 +1289,22 @@ class HttpConnection(_WsFrameMixin):
         self._interest = None
 
     def _update_interest(self):
-        """Arm WRITE only while there is data to send; modify() on change only"""
+        """Arm WRITE only while sending, READ only while listening.
+
+        Dropping READ while a plain response drains is what keeps a client
+        that talks during its own download from spinning the loop: its
+        bytes stay in the socket buffer until reset() re-arms READ. A
+        streaming or WebSocket connection is bidirectional and keeps READ.
+        """
         if self._socket is None or self._interest is None:
             return
-        want = _selectors.EVENT_READ
+        want = 0
+        if not self._response_started or self._is_streaming or self._ws_mode:
+            want |= _selectors.EVENT_READ
         if self.has_data_to_send:
             want |= _selectors.EVENT_WRITE
+        if not want:
+            want = _selectors.EVENT_READ  # a mask of 0 is not selectable
         if want == self._interest:
             return
         if self._selector_call('modify', want, self):

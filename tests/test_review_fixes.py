@@ -7,6 +7,7 @@ branch as well.
 import os
 import re
 import select
+import selectors
 import socket
 import tempfile
 import time
@@ -30,6 +31,19 @@ def drive(server, attempts=20, timeout=0.05):
     return None
 
 
+def read_interest_armed(server, connection):
+    """True while the loop still wakes on this socket being readable.
+
+    2.x drains the unwanted bytes instead, and has no selector - it is
+    always watching, so the caller's readable check decides there.
+    """
+    selector = getattr(server, 'selector', None)
+    if selector is None:
+        return True
+    for key in selector.get_map().values():
+        if key.data is connection:
+            return bool(key.events & selectors.EVENT_READ)
+    return False
 class TestResponseInProgressDrain(unittest.TestCase):
     """Bytes sent while a response is going out must not spin the loop."""
 
@@ -54,9 +68,10 @@ class TestResponseInProgressDrain(unittest.TestCase):
                 server.wait(0.02)
 
             readable, _, _ = select.select([client.socket], [], [], 0)
-            self.assertEqual(
-                readable, [],
-                "unread bytes keep the socket readable - the loop busy-spins")
+            self.assertFalse(
+                readable and read_interest_armed(server, client),
+                "client bytes stay pending and READ stays armed -"
+                " the loop busy-spins")
         finally:
             sock.close()
             server.close()

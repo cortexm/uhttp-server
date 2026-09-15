@@ -429,5 +429,91 @@ class TestWebSocketFacade(unittest.TestCase):
             server.close()
 
 
+def _mask(server, connection):
+    """Selector event mask the connection is registered with, or None."""
+    for key in server.selector.get_map().values():
+        if key.data is connection:
+            return key.events
+    return None
+
+
+class TestResponseReadInterest(unittest.TestCase):
+    """A response in flight must not leave READ armed - that is the spin."""
+
+    PORT = 9990
+
+    def setUp(self):
+        self._flush = uhttp_server.HttpConnection._flush_send_buffer
+        uhttp_server.HttpConnection._flush_send_buffer = lambda self: False
+
+    def tearDown(self):
+        uhttp_server.HttpConnection._flush_send_buffer = self._flush
+
+    def _loaded(self, server, sock):
+        sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        client = _drive(server)
+        self.assertIsNotNone(client)
+        return client
+
+    def test_read_interest_dropped_while_response_is_in_flight(self):
+        server = uhttp_server.HttpServer(port=self.PORT)
+        sock = _connect(self.PORT)
+        try:
+            client = self._loaded(server, sock)
+            client.respond('x' * 4096)
+            self.assertTrue(client.has_data_to_send)
+            mask = _mask(server, client)
+            self.assertEqual(
+                mask & selectors.EVENT_READ, 0,
+                "socket stays readable while the response drains")
+            self.assertTrue(mask & selectors.EVENT_WRITE)
+        finally:
+            sock.close()
+            server.close()
+
+    def test_read_interest_restored_for_the_next_keepalive_request(self):
+        server = uhttp_server.HttpServer(port=self.PORT + 1)
+        sock = _connect(self.PORT + 1)
+        try:
+            client = self._loaded(server, sock)
+            client.respond('x' * 4096)
+            self.assertEqual(_mask(server, client) & selectors.EVENT_READ, 0)
+            uhttp_server.HttpConnection._flush_send_buffer = self._flush
+            client.try_send()
+            self.assertFalse(client._response_started)
+            self.assertTrue(_mask(server, client) & selectors.EVENT_READ)
+        finally:
+            sock.close()
+            server.close()
+
+    def test_streaming_response_keeps_read_interest(self):
+        server = uhttp_server.HttpServer(port=self.PORT + 2)
+        sock = _connect(self.PORT + 2)
+        try:
+            client = self._loaded(server, sock)
+            client.response_stream()
+            self.assertTrue(
+                _mask(server, client) & selectors.EVENT_READ,
+                "streaming needs READ to notice the peer closing")
+        finally:
+            sock.close()
+            server.close()
+
+    def test_websocket_keeps_read_interest_while_sending(self):
+        server = uhttp_server.HttpServer(port=self.PORT + 3, event_mode=True)
+        sock = _connect(self.PORT + 3)
+        try:
+            sock.sendall(WS_UPGRADE)
+            client = _drive(server)
+            self.assertEqual(client.event, EVENT_WS_REQUEST)
+            client.accept_websocket()
+            client.ws_send('x' * 4096)
+            self.assertTrue(client.has_data_to_send)
+            self.assertTrue(_mask(server, client) & selectors.EVENT_READ)
+        finally:
+            sock.close()
+            server.close()
+
+
 if __name__ == '__main__':
     unittest.main()
