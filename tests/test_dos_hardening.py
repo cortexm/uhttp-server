@@ -7,7 +7,11 @@ hardening fixes:
 1. Deeply nested JSON body -> RecursionError. json.loads() raises
    RecursionError (a RuntimeError subclass), which is neither ValueError
    nor ClientError, so it used to propagate out of wait() and crash the
-   server loop. Now caught and turned into 400.
+   server loop. Now caught and turned into 400. Whether a given depth
+   raises at all depends on the interpreter and the thread stack size -
+   3.14 checks the real C stack, so the same body that is a 400 on macOS
+   parses fine on Linux. The loop surviving is the guarantee; the 400 is
+   tested directly instead.
 2. WebSocket auto-pong when the send buffer cap is hit -> OSError. The
    automatic pong reply lives deep inside _ws_process_buffer(); an OSError
    from the send-buffer cap (slow/dead consumer, ping flood) used to
@@ -29,7 +33,7 @@ from tests.test_websocket import build_masked_frame
 
 
 class TestDeepJsonNoCrash(unittest.TestCase):
-    """A deeply nested JSON body must yield 400, not crash the loop."""
+    """A deeply nested JSON body must not crash the loop."""
 
     PORT = 9958
     crash = None
@@ -86,18 +90,36 @@ class TestDeepJsonNoCrash(unittest.TestCase):
         sock.close()
         return data
 
-    def test_deep_json_returns_400_and_survives(self):
-        """~100k-deep JSON array: server answers 400 and stays alive."""
+    def test_deep_json_does_not_kill_the_loop(self):
+        """~100k-deep JSON array: answered either way, loop stays alive."""
         depth = 100000
         body = b'[' * depth + b']' * depth  # valid but pathologically deep
         response = self._request(body)
-        self.assertIn(b"400", response, "deep JSON should be rejected as 400")
+        self.assertTrue(
+            response.startswith(b"HTTP/1.1 400")
+            or response.startswith(b"HTTP/1.1 200"),
+            f"deep JSON was not answered: {response[:40]!r}")
         self.assertIsNone(
             self.crash, f"server loop crashed: {self.crash}")
 
         # Prove the loop is still serving requests after the attack.
         good = self._request(b'{"a":1}')
         self.assertIn(b"200", good, "server stopped serving after deep JSON")
+        self.assertIsNone(self.crash, f"server loop crashed: {self.crash}")
+
+    def test_recursion_error_becomes_400(self):
+        """The depth at which json gives up is not portable, the 400 is."""
+        original = uhttp_server._json.loads
+
+        def exploding_loads(_data):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        uhttp_server._json.loads = exploding_loads
+        try:
+            response = self._request(b'[[[1]]]')
+        finally:
+            uhttp_server._json.loads = original
+        self.assertIn(b"400", response, "RecursionError should become 400")
         self.assertIsNone(self.crash, f"server loop crashed: {self.crash}")
 
 
