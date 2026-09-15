@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, v2]
   pull_request:
-    branches: [main]
+    branches: [main, v2]
 
 jobs:
   test-ubuntu:
@@ -53,6 +53,10 @@ jobs:
     if: github.event_name == 'push'
     needs: [test-ubuntu, test-windows]
     runs-on: [self-hosted, Linux]
+    # One device, two maintained branches - queue instead of colliding.
+    concurrency:
+      group: micropython-${{ matrix.device }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
