@@ -746,6 +746,7 @@ class HttpConnection(_WsFrameMixin):
         self._url = None
         self._protocol = None
         self._headers = None
+        self._headers_repeated = None
         self._data = None
         self._data_loaded = False
         self._path = None
@@ -1007,6 +1008,20 @@ class HttpConnection(_WsFrameMixin):
             return self._headers.get(key, default)
         return default
 
+    def headers_all(self, key):
+        """Every value of a repeated header field, in the order received.
+
+        headers_get() combines repeated field lines into one string, which
+        is lossy when a value may itself contain the separator. This keeps
+        them apart. Returns [] for a header that was not sent.
+        """
+        key = key.lower()
+        if not self._headers or key not in self._headers:
+            return []
+        if self._headers_repeated and key in self._headers_repeated:
+            return list(self._headers_repeated[key])
+        return [self._headers[key]]
+
     def _recv_to_buffer(self, size):
         try:
             buffer = self._socket.recv(size - len(self._buffer))
@@ -1098,6 +1113,7 @@ class HttpConnection(_WsFrameMixin):
 
     def _process_headers(self, header_lines):
         self._headers = {}
+        self._headers_repeated = None
         for line in header_lines:
             if not line:
                 break
@@ -1116,6 +1132,10 @@ class HttpConnection(_WsFrameMixin):
                     # RFC 9110 5.3: repeated field lines combine with a
                     # comma. Cookie is the exception - RFC 6265 separates
                     # its pairs with '; ', so a comma would corrupt it.
+                    if self._headers_repeated is None:
+                        self._headers_repeated = {}
+                    self._headers_repeated.setdefault(
+                        key, [self._headers[key]]).append(val)
                     separator = '; ' if key == COOKIE else ', '
                     val = self._headers[key] + separator + val
                 self._headers[key] = val
@@ -1407,6 +1427,7 @@ class HttpConnection(_WsFrameMixin):
         self._url = None
         self._protocol = None
         self._headers = None
+        self._headers_repeated = None
         self._data = None
         self._data_loaded = False
         self._path = None

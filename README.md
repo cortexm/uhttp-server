@@ -492,6 +492,19 @@ Parameters:
 **`headers_get(self, key, default=None)`**
 
 - Return value from headers by key, or default if key not found
+- Repeated field lines are combined into one value per RFC 9110 5.3 —
+  with `, `, except `Cookie`, which RFC 6265 separates with `; `
+
+**`headers_all(self, key)`**
+
+- Return every value of a repeated header as a list, in the order received,
+  or `[]` if the header was not sent. Use it when combining would be
+  ambiguous, e.g. a value that may itself contain a comma:
+
+```python
+client.headers_get('accept')   # 'text/html, application/xml, text/plain'
+client.headers_all('accept')   # ['text/html, application/xml', 'text/plain']
+```
 
 **`process_request(self)`**
 
