@@ -100,7 +100,76 @@ Three rules carry the whole migration:
    OS buffer is already drained. Drain them before blocking. `wait()` does this
    for you.
 3. **`maintenance()` once per loop iteration** — keep-alive and header
-   timeouts have no event to ride on. `wait()` calls it for you.
+   timeouts have no event to ride on. Call it every time round; it throttles
+   itself to at most one scan per half the shortest timeout, so calling it
+   often costs nothing. `wait()` calls it for you.
+
+### Writing from application code
+
+A send does not have to come from an event handler. `respond()`, `send_event()`,
+`send_ndjson()`, `ws_send()` — called from a timer, another thread's queue, any
+code that holds the connection — buffer the data and **arm write interest
+themselves**, so the shared loop flushes it on the next `EVENT_WRITE` without
+you touching the selector. A server-push stream driven from your own tick works
+the same as one driven from a request.
+
+What the loop still owes you is a turn: the data leaves on the next
+`selector.select()` pass, so the timeout you pass there is also the worst-case
+latency of a push.
+
+### Registering your own sockets
+
+Register the object that owns the socket, with the socket as the key:
+
+```python
+selector.register(my_sock, selectors.EVENT_READ, my_owner)
+```
+
+The contract for `my_owner` is:
+
+- **`handle_event(fileobj, mask)`** is the only method the loop calls. Return
+  value is yours — the loop above only unwraps `HttpConnection`.
+- **You own registration.** Nothing in uhttp registers, modifies or unregisters
+  a key it did not create: `wait()` and `maintenance()` skip keys whose
+  `key.data` is not this server or one of its connections, and `server.close()`
+  closes the selector only if the server created it. Unregister before you
+  close your socket — a closed fd left in a selector raises on the next
+  `select()`.
+- **You call `modify()` yourself** to arm and disarm `EVENT_WRITE`. Arm it when
+  a write buffers, disarm it when the buffer empties: leave it armed and the
+  loop spins, forget to arm it and the write stalls.
+
+```python
+class Sender:
+    def __init__(self, selector, sock):
+        self._selector, self._sock = selector, sock
+        self._out = bytearray()
+        self._mask = selectors.EVENT_READ
+        selector.register(sock, self._mask, self)
+
+    def send(self, data):
+        self._out.extend(data)
+        self._want(selectors.EVENT_READ | selectors.EVENT_WRITE)
+
+    def handle_event(self, fileobj, mask):
+        if mask & selectors.EVENT_WRITE:
+            sent = self._sock.send(self._out)
+            self._out[:] = self._out[sent:]
+            if not self._out:
+                self._want(selectors.EVENT_READ)
+        if mask & selectors.EVENT_READ:
+            ...
+        return None
+
+    def _want(self, mask):
+        if mask != self._mask:
+            self._selector.modify(self._sock, mask, self)
+            self._mask = mask
+
+    def close(self):
+        self._selector.unregister(self._sock)
+        self._sock.close()
+```
 
 ### WebSocket
 
@@ -378,7 +447,7 @@ Parameters:
 
 **`maintenance(self)`**
 
-- Closes idle / timed-out connections. `wait()` calls it after each active tick; call it once per loop iteration when driving a shared selector yourself.
+- Closes idle / timed-out connections — keep-alive and request-header timeouts have no event to ride on. Call it once per loop iteration when driving a shared selector yourself; `wait()` calls it for you. Calling it often is cheap: it throttles itself to at most one scan per half the shortest configured timeout, so the real cleanup rate is bounded by the timeouts, not by your loop.
 
 
 ### Class `HttpConnection`:
@@ -559,7 +628,7 @@ client.headers_all('accept')   # ['text/html, application/xml', 'text/plain']
 
 - Send raw data chunk (str or bytes) to stream
 - Use for SSE comments (`: ping\n\n`), custom formats, or non-SSE streaming
-- Returns `True` on success, `False` if socket is closed
+- Returns `True` on success. Returns `False` **and closes the connection** if the socket is gone or the send buffer cap was hit — a consumer too slow to drain what is already queued (`max_send_buffer_size`)
 
 **`send_event(self, data=None, event=None, event_id=None, retry=None)`**
 
@@ -568,7 +637,7 @@ client.headers_all('accept')   # ['text/html, application/xml', 'text/plain']
 - `event` - Event type name (client listens via `addEventListener()`)
 - `event_id` - Event ID for client reconnection (`Last-Event-ID` header)
 - `retry` - Reconnection time in milliseconds
-- Returns `True` on success, `False` if socket is closed
+- Returns `True` on success. Returns `False` **and closes the connection** if the socket is gone or the send buffer cap was hit — a consumer too slow to drain what is already queued (`max_send_buffer_size`)
 
 **`response_ndjson(self, headers=None, cookies=None)`**
 
@@ -580,7 +649,7 @@ client.headers_all('accept')   # ['text/html, application/xml', 'text/plain']
 
 - Serialize one JSON-serializable value as a single NDJSON line (`json.dumps(obj) + '\n'`)
 - `obj` - any JSON-serializable value (dict/list/str/int/float/bool/None)
-- Returns `True` on success, `False` if socket is closed
+- Returns `True` on success. Returns `False` **and closes the connection** if the socket is gone or the send buffer cap was hit — a consumer too slow to drain what is already queued (`max_send_buffer_size`)
 
 **`response_stream_end(self)`**
 

@@ -1926,7 +1926,10 @@ class HttpConnection(_WsFrameMixin):
         Args:
             data: str or bytes to send
 
-        Returns True on success, False if socket is closed.
+        Returns True on success. Returns False and closes the
+        connection if the socket is gone or the send buffer cap was
+        hit - a consumer too slow to drain what is already queued
+        (max_send_buffer_size).
         """
         if self._socket is None:
             return False
@@ -1948,7 +1951,10 @@ class HttpConnection(_WsFrameMixin):
             event_id: Event ID for client reconnection
             retry: Reconnection time in milliseconds
 
-        Returns True on success, False if socket is closed.
+        Returns True on success. Returns False and closes the
+        connection if the socket is gone or the send buffer cap was
+        hit - a consumer too slow to drain what is already queued
+        (max_send_buffer_size).
         """
         if self._socket is None:
             return False
@@ -1995,7 +2001,10 @@ class HttpConnection(_WsFrameMixin):
         Args:
             obj: any JSON-serializable value (dict/list/str/int/float/bool/None)
 
-        Returns True on success, False if socket is closed.
+        Returns True on success. Returns False and closes the
+        connection if the socket is gone or the send buffer cap was
+        hit - a consumer too slow to drain what is already queued
+        (max_send_buffer_size).
         """
         if self._socket is None:
             return False
