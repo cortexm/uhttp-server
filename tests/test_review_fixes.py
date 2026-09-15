@@ -5,6 +5,7 @@ Driven through server.wait() only, so they stay valid on the selectors
 branch as well.
 """
 import os
+import re
 import select
 import socket
 import tempfile
@@ -166,6 +167,26 @@ class TestForwardedForJoin(unittest.TestCase):
             self.assertIn('10.0.0.1', client.remote_addresses)
             self.assertIn('10.0.0.2', client.remote_addresses)
             self.assertEqual(client.remote_address, '10.0.0.1')
+        finally:
+            sock.close()
+            server.close()
+
+
+class TestDuplicateCookieHeaders(unittest.TestCase):
+    """Cookies use '; ', so combining them with a comma corrupts them."""
+
+    PORT = 9711
+
+    def test_repeated_cookie_headers_stay_parsable(self):
+        server = uhttp_server.HttpServer(port=self.PORT)
+        sock = connect(self.PORT)
+        try:
+            sock.sendall(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\n"
+                b"Cookie: a=1\r\nCookie: b=2\r\n\r\n")
+            client = drive(server)
+            self.assertIsNotNone(client)
+            self.assertEqual(client.cookies, {'a': '1', 'b': '2'})
         finally:
             sock.close()
             server.close()
@@ -385,3 +406,24 @@ class TestRespondLargerThanTheCap(unittest.TestCase):
         finally:
             sock.close()
             server.close()
+
+
+class TestMicroPythonPortability(unittest.TestCase):
+    """Source-level guards for constructs CPython accepts and MicroPython does not.
+
+    A behavioural test cannot catch these: the code runs fine here and only
+    fails on-device, where the exception lands *after* the bytes are already
+    on the wire - so a client still sees a valid response and only the next
+    request reveals that the server loop died.
+    """
+
+    def test_no_bytearray_slice_deletion(self):
+        # MicroPython: "'bytearray' object doesn't support item deletion".
+        # Use `buf[:] = buf[n:]` instead - it shrinks in place and keeps
+        # the object, verified on an ESP32-C6.
+        source = open(uhttp_server.__file__).read()
+        offenders = [
+            line.strip() for line in source.splitlines()
+            if re.search(r'\bdel\s+[\w.]+\[[^\]]*:', line)]
+        self.assertEqual(
+            offenders, [], "slice deletion is not supported on MicroPython")

@@ -432,10 +432,8 @@ class _WsFrameMixin:
                     return True
                 return False
 
-            # Frame complete
             self._ws_frame_header_parsed = False
 
-            # Control frame
             if self._ws_frame_opcode >= 0x8:
                 if self._ws_frame_opcode == WS_OPCODE_PING:
                     # Auto-pong may raise OSError if the send buffer cap is
@@ -470,7 +468,6 @@ class _WsFrameMixin:
                     self._ws_control_buffer = bytearray()
                     self._ws_on_close()
                     return True
-                # Pong - ignore
                 self._ws_control_buffer = bytearray()
                 continue
 
@@ -480,7 +477,6 @@ class _WsFrameMixin:
                 self._event = EVENT_WS_CHUNK_FIRST
                 return True
 
-            # Data frame complete
             if self._ws_frame_fin:
                 self._event = EVENT_WS_MESSAGE
                 return True
@@ -510,7 +506,6 @@ class _WsFrameMixin:
         self._ws_frame_opcode = opcode
         if opcode != WS_OPCODE_CONTINUATION and opcode < 0x8:
             self._ws_message_opcode = opcode
-            # Auto-clear unread data from previous message
             if self._ws_fragment_buffer:
                 self._ws_fragment_buffer = bytearray()
         masked = bool(b1 & 0x80)
@@ -719,7 +714,7 @@ class WebSocket(_WsFrameMixin):
             if sent is None:
                 return
             if sent > 0:
-                del self._send_buffer[:sent]
+                self._send_buffer[:] = self._send_buffer[sent:]
             else:
                 return
 
@@ -776,7 +771,6 @@ class HttpConnection(_WsFrameMixin):
         self._file_handle = None
         self._last_activity = _time.time()
         self._requests_count = 0
-        # Event mode attributes
         self.context = None
         self._event = None
         self._bytes_received = 0
@@ -787,10 +781,8 @@ class HttpConnection(_WsFrameMixin):
         self._body_file_handle = None
         self._to_file = None
         self._expect_continue = False
-        # WebSocket attributes
         _WsFrameMixin.__init__(self)
         self._ws_mode = False
-        # Config from kwargs
         self._max_headers_length = kwargs.get(
             'max_headers_length', MAX_HEADERS_LENGTH)
         self._max_content_length = kwargs.get(
@@ -905,7 +897,6 @@ class HttpConnection(_WsFrameMixin):
     @property
     def data(self):
         """Content data (parsed JSON/form or raw bytes)"""
-        # Lazy parse buffer on EVENT_COMPLETE (after accept_body)
         if not self._data_loaded and self._event == EVENT_COMPLETE and self._buffer:
             self._process_data()
         return self._data
@@ -1135,11 +1126,13 @@ class HttpConnection(_WsFrameMixin):
                     raise HttpErrorWithResponse(
                         400, f"Duplicate {key} header")
                 if key in self._headers:
-                    # RFC 7230: repeated field lines combine with a comma
-                    val = self._headers[key] + ', ' + val
+                    # RFC 9110 5.3: repeated field lines combine with a
+                    # comma. Cookie is the exception - RFC 6265 separates
+                    # its pairs with '; ', so a comma would corrupt it.
+                    separator = '; ' if key == COOKIE else ', '
+                    val = self._headers[key] + separator + val
                 self._headers[key] = val
 
-        # Reject Transfer-Encoding (chunked not supported)
         if 'transfer-encoding' in self._headers:
             raise HttpErrorWithResponse(501, "Transfer-Encoding not supported")
 
@@ -1148,12 +1141,10 @@ class HttpConnection(_WsFrameMixin):
             raise HttpErrorWithResponse(
                 400, "Host header is required for HTTP/1.1")
 
-        # Handle Expect: 100-continue
         expect = self.headers_get_attribute(EXPECT, '').lower()
         if expect == EXPECT_100_CONTINUE and self.content_length:
             self._expect_continue = True
             if not self._server.event_mode:
-                # Non-event mode: send 100 Continue immediately
                 self._send_100_continue()
 
         if self.content_length:
@@ -1251,11 +1242,13 @@ class HttpConnection(_WsFrameMixin):
         """
         self._send_offset += sent
         remaining = len(self._send_buffer) - self._send_offset
+        # MicroPython bytearrays support slice assignment but not deletion,
+        # so shrink in place that way - it keeps the object either way.
         if not remaining:
-            del self._send_buffer[:]
+            self._send_buffer[:] = b''
             self._send_offset = 0
         elif self._send_offset >= remaining:
-            del self._send_buffer[:self._send_offset]
+            self._send_buffer[:] = self._send_buffer[self._send_offset:]
             self._send_offset = 0
 
     def _flush_send_buffer(self):
@@ -1348,7 +1341,6 @@ class HttpConnection(_WsFrameMixin):
         self._is_streaming = False
         self._response_started = False
         self._response_keep_alive = False
-        # Reset event mode attributes
         self.context = None
         self._event = None
         self._bytes_received = 0
@@ -1460,7 +1452,7 @@ class HttpConnection(_WsFrameMixin):
         if self._method is None:
             self._read_headers()
             if self._method is None:
-                return False  # Headers not complete yet
+                return False
             return self._handle_headers_complete()
 
         # Phase 2: Streaming body
@@ -1473,7 +1465,6 @@ class HttpConnection(_WsFrameMixin):
     def _handle_headers_complete(self):
         """Handle completed headers, decide event type"""
         if not self.content_length:
-            # No body - complete request
             if self.is_websocket_request:
                 self._event = EVENT_WS_REQUEST
             else:
@@ -1481,7 +1472,6 @@ class HttpConnection(_WsFrameMixin):
             self._requests_count += 1
             return True
 
-        # Check if small body already arrived with headers
         if self._data_loaded or len(self._buffer) >= self.content_length:
             if not self._data_loaded:
                 self._process_data()
@@ -1489,7 +1479,6 @@ class HttpConnection(_WsFrameMixin):
             self._requests_count += 1
             return True
 
-        # Body expected but not complete - notify headers ready
         self._event = EVENT_HEADERS
         return True
 
@@ -1498,15 +1487,13 @@ class HttpConnection(_WsFrameMixin):
         self._recv_to_buffer(self._max_content_length)
 
         if not self._buffer:
-            return False  # No new data
+            return False
 
-        # Write to file if in file mode
         if self._body_file_handle:
             self._write_buffer_to_file()
             if self._event == EVENT_ERROR:
                 return True
 
-        # Check if body is complete
         total = self._bytes_received + len(self._buffer)
         if self.content_length and total > self.content_length:
             self._close_body_file(delete=True)
@@ -1520,7 +1507,6 @@ class HttpConnection(_WsFrameMixin):
             self._requests_count += 1
             return True
 
-        # If not streaming events, keep buffering until complete
         if not self._streaming_events:
             return False
 
@@ -1794,8 +1780,6 @@ class HttpConnection(_WsFrameMixin):
             boundary = BOUNDARY
         self._is_streaming = False
 
-        # Determine keep-alive behavior (multipart was started without Connection header)
-        # Use default protocol behavior
         keep_alive = self._should_keep_alive()
         self._response_keep_alive = keep_alive
 
@@ -2262,7 +2246,6 @@ class HttpServer():
 
             client = server1.process_events(r, w) or server2.process_events(r, w)
         """
-        # Check pending connections first (event mode)
         pending = self._get_pending_connection()
         if pending:
             if pending._ws_mode:
@@ -2280,7 +2263,6 @@ class HttpServer():
     def wait(self, timeout=1):
         """Wait for new clients with specified timeout,
         returns None or instance of HttpConnection with established connection"""
-        # Check pending connections first (event mode)
         pending = self._get_pending_connection()
         if pending:
             if pending._ws_mode:
