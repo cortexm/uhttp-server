@@ -697,14 +697,37 @@ class WebSocket:
         self._update_interest()
         return ok
 
+    def pause_reading(self, timeout=None):
+        """Stop reading inbound frames to stall the peer via TCP backpressure.
+
+        See HttpConnection.pause_reading(). Outbound send() still works.
+        A standalone WebSocket is application-driven, so timeout is stored
+        but not enforced here — apply the deadline in the driving loop.
+        """
+        self._connection._read_paused = True
+        self._connection._read_pause_timeout = timeout
+        self._update_interest()
+
+    def resume_reading(self):
+        """Resume reading inbound frames after pause_reading()."""
+        self._connection._read_paused = False
+        self._connection._read_pause_timeout = None
+        self._connection.update_activity()
+        self._update_interest()
+
     def _update_interest(self):
         connection = self._connection
         if connection._socket is None:
             self._unregister()
             return
-        want = _selectors.EVENT_READ
+        want = 0
+        if not connection._read_paused:
+            want |= _selectors.EVENT_READ
         if connection.has_data_to_send:
             want |= _selectors.EVENT_WRITE
+        if not want:
+            self._unregister()  # paused with nothing to send: stop watching
+            return
         if want == self._interest:
             return
         method = 'register' if self._interest is None else 'modify'
@@ -741,6 +764,8 @@ class HttpConnection(_WsFrameMixin):
         self._send_offset = 0
         self._interest = None  # selector mask; None = not registered
         self._detached = False  # handed off to a WebSocket object
+        self._read_paused = False  # app backpressure: stop reading, stall TCP
+        self._read_pause_timeout = None
         self._rx_bytes_counter = 0
         self._method = None
         self._url = None
@@ -928,8 +953,19 @@ class HttpConnection(_WsFrameMixin):
 
     @property
     def is_timed_out(self):
-        """True when connection has been idle too long"""
-        return (_time.time() - self._last_activity) > self._keep_alive_timeout
+        """True when connection has been idle too long.
+
+        While reading is paused the deadline is the pause override if set
+        (0 or less disables it, so the app owns the lifecycle), else the
+        usual keep-alive timeout — a paused consumer that never drains ages
+        out like any other idle connection.
+        """
+        limit = self._keep_alive_timeout
+        if self._read_paused and self._read_pause_timeout is not None:
+            if self._read_pause_timeout <= 0:
+                return False
+            limit = self._read_pause_timeout
+        return (_time.time() - self._last_activity) > limit
 
     @property
     def is_max_requests_reached(self):
@@ -1315,15 +1351,26 @@ class HttpConnection(_WsFrameMixin):
         that talks during its own download from spinning the loop: its
         bytes stay in the socket buffer until reset() re-arms READ. A
         streaming or WebSocket connection is bidirectional and keeps READ.
+
+        pause_reading() also drops READ: with nothing left to watch the
+        socket is unregistered so its kernel buffer fills and TCP stalls the
+        peer (backpressure). resume_reading() re-registers it. Registration
+        is owned by _accept()/resume_reading(); this only ever modifies or
+        unregisters an already-registered socket (_interest is None -> skip).
         """
         if self._socket is None or self._interest is None:
             return
         want = 0
-        if not self._response_started or self._is_streaming or self._ws_mode:
+        read_ok = (not self._response_started
+                   or self._is_streaming or self._ws_mode)
+        if read_ok and not self._read_paused:
             want |= _selectors.EVENT_READ
         if self.has_data_to_send:
             want |= _selectors.EVENT_WRITE
         if not want:
+            if self._read_paused:
+                self._unregister()
+                return
             want = _selectors.EVENT_READ  # a mask of 0 is not selectable
         if want == self._interest:
             return
@@ -1331,6 +1378,34 @@ class HttpConnection(_WsFrameMixin):
             self._interest = want
         else:
             self.close()  # can't be re-armed: it would hang forever
+
+    def pause_reading(self, timeout=None):
+        """Stop reading from the socket to slow the peer via TCP backpressure.
+
+        Use when the application cannot keep up with an inbound WebSocket
+        stream or request-body upload: the socket is left unread, its kernel
+        buffer fills and TCP stalls the sender. Outbound sending is
+        unaffected.
+
+        timeout: seconds the connection may stay paused before maintenance()
+        closes it as a stuck consumer. None uses the keep-alive timeout; a
+        value <= 0 disables the deadline (the application owns the lifecycle).
+        A slow-but-alive consumer that resumes and drains periodically keeps
+        the connection alive, since each read refreshes the activity clock.
+        """
+        self._read_paused = True
+        self._read_pause_timeout = timeout
+        self._update_interest()
+
+    def resume_reading(self):
+        """Resume reading after pause_reading() and re-arm the socket."""
+        self._read_paused = False
+        self._read_pause_timeout = None
+        self.update_activity()
+        if self._socket is not None and not self._detached:
+            if self._interest is None:
+                self._register()
+            self._update_interest()
 
     def handle_event(self, fileobj, mask):
         """Owner dispatch for a selector event.
@@ -1448,6 +1523,8 @@ class HttpConnection(_WsFrameMixin):
         self._expect_continue = False
         self._request_start = None
         self._headers_scanned = 0
+        self._read_paused = False
+        self._read_pause_timeout = None
         self.update_activity()
 
     def close(self):
@@ -2268,6 +2345,10 @@ class HttpServer():
             return
         self._last_maintenance = now
         for connection in list(self._waiting_connections):
+            if connection._read_paused:
+                if connection.is_timed_out:
+                    connection.close()  # stuck consumer guard
+                continue
             if connection._is_streaming:
                 continue
             if connection._ws_mode:
