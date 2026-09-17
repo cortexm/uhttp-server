@@ -684,6 +684,15 @@ client.headers_all('accept')   # ['text/html, application/xml', 'text/plain']
 
 - Send WebSocket close frame and close connection
 
+**`pause_reading(self, timeout=None)`**
+
+- Stop reading from the socket so its kernel buffer fills and TCP stalls the peer (inbound backpressure). Use when the application cannot keep up with an inbound WebSocket stream or a request-body upload. Outbound sending is unaffected.
+- `timeout` - seconds the connection may stay paused before `maintenance()` closes it as a stuck consumer. `None` (default) uses the keep-alive timeout; a value `<= 0` disables the deadline (the application owns the lifecycle). A slow-but-alive consumer that resumes and drains periodically stays alive, since each read refreshes the activity clock.
+
+**`resume_reading(self)`**
+
+- Resume reading after `pause_reading()` and re-arm the socket.
+
 
 ## Server-Sent Events (SSE)
 
@@ -925,6 +934,7 @@ while True:
 - `ws_send(data)` - Send message (str → text frame, bytes → binary frame)
 - `ws_ping(data=b'')` - Send ping frame
 - `ws_close(code=1000, reason='')` - Close WebSocket connection
+- `pause_reading(timeout=None)` / `resume_reading()` - Inbound backpressure (see [Backpressure](#backpressure-pausing-reads))
 
 **WebSocket object (non-event mode):**
 - `recv(timeout=None)` - Receive message (blocking). Returns str/bytes/None
@@ -932,12 +942,48 @@ while True:
 - `ping(data=b'')` - Send ping frame
 - `close(code=1000, reason='')` - Close connection
 - `is_closed` - True if connection is closed
+- `pause_reading(timeout=None)` / `resume_reading()` - Inbound backpressure. `timeout` is stored but not enforced by a standalone WebSocket (it is application-driven — apply the deadline in your own loop)
 
 ### Large Message Chunking
 
 Messages larger than `MAX_WS_MESSAGE_LENGTH` (default 64KB, configurable via `max_ws_message_length` kwarg) are delivered in chunks via `EVENT_WS_CHUNK_FIRST`, `EVENT_WS_CHUNK_NEXT`, `EVENT_WS_CHUNK_LAST` events. Read chunk data with `read_buffer()`, check frame type with `ws_is_text`.
 
 In non-event mode, messages exceeding the limit close the connection with status 1009.
+
+
+## Backpressure (pausing reads)
+
+When the application cannot keep up with an inbound WebSocket stream or a
+request-body upload, it can stop reading the socket. Its kernel buffer then
+fills and TCP stalls the peer — no application-level protocol needed. Outbound
+sending is unaffected, so a paused connection can still send.
+
+`pause_reading(timeout=None)` drops the socket's read interest; `resume_reading()`
+re-arms it. A paused connection that never drains is closed by `maintenance()`
+as a stuck-consumer guard: `timeout=None` uses the keep-alive timeout, a value
+`<= 0` disables the deadline (you own the lifecycle). A slow-but-alive consumer
+that resumes and drains periodically stays alive, because each read refreshes
+the activity clock — this is the pattern for forwarding to a slow sink (a
+low-baud serial port, a slow disk) without dropping the connection.
+
+```python
+# Event-mode server: throttle a fast WebSocket producer to a slow sink.
+client = server.wait(1.0)
+if client and client.event == EVENT_WS_MESSAGE:
+    queue.append(client.read_buffer())
+    if len(queue) > HIGH_WATER:
+        client.pause_reading()          # stop reading; TCP stalls the peer
+    ...
+# elsewhere, once the sink has caught up:
+if client.is_websocket and len(queue) < LOW_WATER:
+    client.resume_reading()             # start reading again
+```
+
+The same applies to uploads: after `accept_body()` with `streaming=True`, call
+`pause_reading()` while your `EVENT_DATA` handler is behind and `resume_reading()`
+when it catches up. A standalone (non-event) `WebSocket` exposes the same two
+methods, but stores `timeout` without enforcing it — it is application-driven,
+so apply the deadline in your own loop.
 
 
 ## Event Mode
