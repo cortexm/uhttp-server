@@ -16,6 +16,11 @@ KB = 2 ** 10
 MB = 2 ** 20
 GB = 2 ** 30
 
+# would-block errnos: EAGAIN, plus Windows-only EWOULDBLOCK when it differs
+_WOULDBLOCK = (errno.EAGAIN,)
+if getattr(errno, 'EWOULDBLOCK', errno.EAGAIN) != errno.EAGAIN:
+    _WOULDBLOCK += (errno.EWOULDBLOCK,)
+
 LISTEN_SOCKETS = 8
 MAX_WAITING_CLIENTS = 32
 MAX_HEADERS_LENGTH = 4 * KB
@@ -1062,7 +1067,7 @@ class HttpConnection(_WsFrameMixin):
         try:
             buffer = self._socket.recv(size - len(self._buffer))
         except OSError as err:
-            if err.errno in (errno.EAGAIN, errno.ENOENT):
+            if err.errno in _WOULDBLOCK or err.errno == errno.ENOENT:
                 # EAGAIN: no data available (non-blocking)
                 # ENOENT: SSL handshake in progress (CPython)
                 return
@@ -1092,7 +1097,7 @@ class HttpConnection(_WsFrameMixin):
         try:
             data = self._socket.recv(self._file_chunk_size)
         except OSError as err:
-            if err.errno in (errno.EAGAIN, errno.ENOENT):
+            if err.errno in _WOULDBLOCK or err.errno == errno.ENOENT:
                 return
             raise HttpDisconnected(f"{err}: {self.addr}") from err
         if data is None:
@@ -1309,7 +1314,7 @@ class HttpConnection(_WsFrameMixin):
                 self._consume_sent(sent)
             return self.send_buffer_size == 0
         except OSError as err:
-            if err.errno == errno.EAGAIN:
+            if err.errno in _WOULDBLOCK:
                 return False
             self.close()
             return False
@@ -2210,7 +2215,7 @@ class HttpConnection(_WsFrameMixin):
         try:
             data = self._socket.recv(self._file_chunk_size)
         except OSError as err:
-            if err.errno in (errno.EAGAIN, errno.ENOENT):
+            if err.errno in _WOULDBLOCK or err.errno == errno.ENOENT:
                 return
             raise HttpDisconnected(f"{err}: {self.addr}") from err
         if data is None:
