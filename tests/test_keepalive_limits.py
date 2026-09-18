@@ -7,6 +7,7 @@ import socket
 import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import read_response, wait_until_listening
 
 
 class TestKeepAliveMaxRequests(unittest.TestCase):
@@ -32,7 +33,7 @@ class TestKeepAliveMaxRequests(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -55,31 +56,7 @@ class TestKeepAliveMaxRequests(unittest.TestCase):
                     request = f"GET /test{i} HTTP/1.1\r\nHost: localhost\r\n\r\n"
                     sock.send(request.encode())
 
-                    response = b''
-                    content_length = None
-                    body_start = None
-
-                    while True:
-                        try:
-                            chunk = sock.recv(1024)
-                            if not chunk:
-                                # Connection closed
-                                break
-                            response += chunk
-
-                            if b'\r\n\r\n' in response and content_length is None:
-                                headers = response.split(b'\r\n\r\n')[0].decode()
-                                if 'Content-Length:' in headers:
-                                    content_length_line = [l for l in headers.split('\r\n')
-                                                           if 'Content-Length' in l][0]
-                                    content_length = int(content_length_line.split(':')[1].strip())
-                                    body_start = response.index(b'\r\n\r\n') + 4
-
-                            if content_length is not None and body_start is not None:
-                                if len(response) >= body_start + content_length:
-                                    break
-                        except socket.timeout:
-                            break
+                    response = read_response(sock)
 
                     if response:
                         response_str = response.decode()
@@ -128,33 +105,8 @@ class TestKeepAliveMaxRequests(unittest.TestCase):
                 request = f"GET /req{i} HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 sock.send(request.encode())
 
-                response = b''
-                content_length = None
-                body_start = None
-
-                while True:
-                    try:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                        if b'\r\n\r\n' in response and content_length is None:
-                            headers = response.split(b'\r\n\r\n')[0].decode()
-                            if 'Content-Length:' in headers:
-                                content_length_line = [l for l in headers.split('\r\n')
-                                                       if 'Content-Length' in l][0]
-                                content_length = int(content_length_line.split(':')[1].strip())
-                                body_start = response.index(b'\r\n\r\n') + 4
-
-                        if content_length is not None and body_start is not None:
-                            if len(response) >= body_start + content_length:
-                                break
-                    except socket.timeout:
-                        break
-
+                response = read_response(sock)
                 self.assertIn(b"200 OK", response)
-                time.sleep(0.1)
 
             # 4th request should fail (connection closed)
             request4 = b"GET /req4 HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -182,7 +134,7 @@ class TestKeepAliveTimeout(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Start server with timeout=2s"""
-        cls.server = uhttp_server.HttpServer(port=cls.PORT, keep_alive_timeout=2)
+        cls.server = uhttp_server.HttpServer(port=cls.PORT, keep_alive_timeout=1)
 
         def run_server():
             try:
@@ -195,7 +147,7 @@ class TestKeepAliveTimeout(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -215,33 +167,11 @@ class TestKeepAliveTimeout(unittest.TestCase):
             request = b"GET /test1 HTTP/1.1\r\nHost: localhost\r\n\r\n"
             sock.send(request)
 
-            response = b''
-            content_length = None
-            body_start = None
-
-            while True:
-                chunk = sock.recv(1024)
-                if not chunk:
-                    break
-                response += chunk
-
-                if b'\r\n\r\n' in response and content_length is None:
-                    headers = response.split(b'\r\n\r\n')[0].decode()
-                    headers_lower = headers.lower()
-                    if 'content-length:' in headers_lower:
-                        content_length_line = [l for l in headers.split('\r\n')
-                                               if 'content-length' in l.lower()][0]
-                        content_length = int(content_length_line.split(':')[1].strip())
-                        body_start = response.index(b'\r\n\r\n') + 4
-
-                if content_length is not None and body_start is not None:
-                    if len(response) >= body_start + content_length:
-                        break
-
+            response = read_response(sock)
             self.assertIn(b"200 OK", response)
 
-            # Wait for timeout (2s) + margin
-            time.sleep(2.5)
+            # Wait for the keep-alive timeout (1s) + margin
+            time.sleep(1.2)
 
             # Trigger a read event with a new connection to cause cleanup
             # (idle connection cleanup happens at the end of event_read)
@@ -282,40 +212,17 @@ class TestKeepAliveTimeout(unittest.TestCase):
             sock.connect(('localhost', self.PORT))
             sock.settimeout(1.0)
 
-            # Send 3 requests, each within the timeout window (2s)
+            # Send 3 requests, each within the timeout window (1s)
             for i in range(3):
                 request = f"GET /test{i} HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 sock.send(request.encode())
 
-                response = b''
-                content_length = None
-                body_start = None
-
-                while True:
-                    try:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                        if b'\r\n\r\n' in response and content_length is None:
-                            headers = response.split(b'\r\n\r\n')[0].decode()
-                            if 'Content-Length:' in headers:
-                                content_length_line = [l for l in headers.split('\r\n')
-                                                       if 'Content-Length' in l][0]
-                                content_length = int(content_length_line.split(':')[1].strip())
-                                body_start = response.index(b'\r\n\r\n') + 4
-
-                        if content_length is not None and body_start is not None:
-                            if len(response) >= body_start + content_length:
-                                break
-                    except socket.timeout:
-                        break
+                response = read_response(sock)
 
                 self.assertIn(b"200 OK", response)
 
-                # Wait 1s between requests (less than 2s timeout)
-                time.sleep(1.0)
+                # Wait between requests, but less than the 1s timeout
+                time.sleep(0.4)
 
         finally:
             sock.close()

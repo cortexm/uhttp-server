@@ -5,6 +5,7 @@ import socket
 import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 
 class TestRequestTimeout(unittest.TestCase):
@@ -13,7 +14,7 @@ class TestRequestTimeout(unittest.TestCase):
     server = None
     server_thread = None
     PORT = 9966
-    TIMEOUT = 1  # minimal timeout for fast tests
+    TIMEOUT = 0.5  # minimal timeout for fast tests
 
     @classmethod
     def setUpClass(cls):
@@ -31,7 +32,7 @@ class TestRequestTimeout(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -49,23 +50,32 @@ class TestRequestTimeout(unittest.TestCase):
         sock.close()
         self.assertIn(b'200', response)
 
-    def test_slow_header_gets_408(self):
-        """Sending headers byte-by-byte slower than timeout should get 408"""
+    def _trigger_maintenance(self):
+        """Idle cleanup is traffic-driven, so give the loop an event to ride on
+
+        Without this a lone stalled client is never timed out and the test
+        only waits out its own socket timeout.
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
+        sock.settimeout(3.0)
         sock.connect(('localhost', self.PORT))
-        # Send partial request
+        sock.sendall(b"GET /trigger HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        sock.recv(4096)
+        sock.close()
+
+    def test_slow_header_gets_408(self):
+        """Headers that never complete must be answered with 408"""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3.0)
+        sock.connect(('localhost', self.PORT))
         sock.sendall(b"GET / HTTP/1.1\r\n")
-        # Wait longer than request_timeout
-        time.sleep(self.TIMEOUT + 1)
-        # Try to receive — should get 408 or connection closed
+        time.sleep(self.TIMEOUT + 0.2)
+        self._trigger_maintenance()
         try:
             response = sock.recv(4096)
-            if response:
-                self.assertIn(b'408', response)
-        except (ConnectionResetError, OSError):
-            pass  # Connection closed is also acceptable
-        sock.close()
+        finally:
+            sock.close()
+        self.assertIn(b'408', response)
 
     def test_slow_header_does_not_block_others(self):
         """Slow client should not prevent fast clients from being served"""

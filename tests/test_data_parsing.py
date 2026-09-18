@@ -8,6 +8,7 @@ import time
 import threading
 import json
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 
 class TestDataParsing(unittest.TestCase):
@@ -44,7 +45,7 @@ class TestDataParsing(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)  # Wait for server to start
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):

@@ -507,6 +507,38 @@ class TestEventModeBackwardsCompatibility(unittest.TestCase):
             sock.close()
 
 
+class TestEventModeDisconnect(unittest.TestCase):
+    """A peer that leaves before sending anything must not spin the loop"""
+
+    PORT = 9968
+
+    def test_disconnect_emits_one_error_event(self):
+        """EVENT_ERROR is emitted once and the connection is closed
+
+        The application is not required to close on EVENT_ERROR (the README
+        example only prints the error), so a connection left registered at
+        EOF would be reported readable on every tick and re-emit the event
+        forever — a port scanner or a load balancer health check was enough
+        to pin a core at 100%.
+        """
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect(('localhost', self.PORT))
+            sock.close()
+
+            events = []
+            for _ in range(20):
+                client = server.wait(timeout=0.05)
+                if client:
+                    events.append(client.event)
+
+            self.assertEqual(events, [EVENT_ERROR])
+            self.assertEqual(server._waiting_connections, [])
+        finally:
+            server.close()
+
+
 class TestEventModeConstants(unittest.TestCase):
     """Test event mode constants are exported correctly"""
 

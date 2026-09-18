@@ -2,11 +2,12 @@
 """
 Simple test for persistent connections
 """
+import json
 import unittest
 import socket
-import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import read_response, wait_until_listening
 
 
 class TestKeepAliveSimple(unittest.TestCase):
@@ -40,7 +41,7 @@ class TestKeepAliveSimple(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -66,35 +67,7 @@ class TestKeepAliveSimple(unittest.TestCase):
                 request = f"GET /test{i} HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 sock.send(request.encode())
 
-                # Receive response with proper Content-Length handling
-                response = b''
-                content_length = None
-                body_start = None
-
-                while True:
-                    try:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                        if b'\r\n\r\n' in response and content_length is None:
-                            # Parse headers to get Content-Length
-                            headers = response.split(b'\r\n\r\n')[0].decode()
-                            if 'Content-Length:' in headers:
-                                content_length_line = [l for l in headers.split('\r\n')
-                                                       if 'Content-Length' in l][0]
-                                content_length = int(content_length_line.split(':')[1].strip())
-                                body_start = response.index(b'\r\n\r\n') + 4
-
-                        # Check if we have complete response
-                        if content_length is not None and body_start is not None:
-                            if len(response) >= body_start + content_length:
-                                break
-                    except socket.timeout:
-                        break
-
-                response_str = response.decode()
+                response_str = read_response(sock).decode()
                 responses.append(response_str)
 
                 # Verify response
@@ -105,8 +78,6 @@ class TestKeepAliveSimple(unittest.TestCase):
                 # Check for keep-alive header (except possibly the last one)
                 if i < 2:
                     self.assertIn("keep-alive", response_str.lower())
-
-                time.sleep(0.2)
 
             # Verify all 3 responses received
             self.assertEqual(len(responses), 3)
@@ -124,33 +95,7 @@ class TestKeepAliveSimple(unittest.TestCase):
             request = b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n"
             sock.send(request)
 
-            # Receive response
-            response = b''
-            content_length = None
-            body_start = None
-
-            while True:
-                try:
-                    chunk = sock.recv(1024)
-                    if not chunk:
-                        break
-                    response += chunk
-
-                    if b'\r\n\r\n' in response and content_length is None:
-                        headers = response.split(b'\r\n\r\n')[0].decode()
-                        if 'Content-Length:' in headers:
-                            content_length_line = [l for l in headers.split('\r\n')
-                                                   if 'Content-Length' in l][0]
-                            content_length = int(content_length_line.split(':')[1].strip())
-                            body_start = response.index(b'\r\n\r\n') + 4
-
-                    if content_length is not None and body_start is not None:
-                        if len(response) >= body_start + content_length:
-                            break
-                except socket.timeout:
-                    break
-
-            response_str = response.decode()
+            response_str = read_response(sock).decode()
 
             # Verify Connection: keep-alive header is present
             self.assertIn("200 OK", response_str)
@@ -205,42 +150,12 @@ class TestKeepAliveSimple(unittest.TestCase):
                 request = f"GET /req{i} HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 sock.send(request.encode())
 
-                # Receive response
-                response = b''
-                content_length = None
-                body_start = None
-
-                while True:
-                    try:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                        if b'\r\n\r\n' in response and content_length is None:
-                            headers = response.split(b'\r\n\r\n')[0].decode()
-                            if 'Content-Length:' in headers:
-                                content_length_line = [l for l in headers.split('\r\n')
-                                                       if 'Content-Length' in l][0]
-                                content_length = int(content_length_line.split(':')[1].strip())
-                                body_start = response.index(b'\r\n\r\n') + 4
-
-                        if content_length is not None and body_start is not None:
-                            if len(response) >= body_start + content_length:
-                                break
-                    except socket.timeout:
-                        break
-
-                response_str = response.decode()
+                response_str = read_response(sock).decode()
 
                 # Extract request_number from JSON response
-                import json
                 body_start = response_str.index('\r\n\r\n') + 4
-                body = response_str[body_start:]
-                data = json.loads(body)
+                data = json.loads(response_str[body_start:])
                 request_numbers.append(data['request_number'])
-
-                time.sleep(0.1)
 
             # Verify request numbers increment: [1, 2, 3]
             self.assertEqual(request_numbers, [1, 2, 3])

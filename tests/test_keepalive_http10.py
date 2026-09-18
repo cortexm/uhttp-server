@@ -7,6 +7,7 @@ import socket
 import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import read_response, wait_until_listening
 
 
 class TestHTTP10KeepAlive(unittest.TestCase):
@@ -36,7 +37,7 @@ class TestHTTP10KeepAlive(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -95,33 +96,7 @@ class TestHTTP10KeepAlive(unittest.TestCase):
                 request = f"GET /test{i} HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
                 sock.send(request.encode())
 
-                # Read response
-                response = b''
-                content_length = None
-                body_start = None
-
-                try:
-                    while True:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                        if b'\r\n\r\n' in response and content_length is None:
-                            headers = response.split(b'\r\n\r\n')[0].decode()
-                            if 'Content-Length:' in headers:
-                                content_length_line = [l for l in headers.split('\r\n')
-                                                       if 'Content-Length' in l][0]
-                                content_length = int(content_length_line.split(':')[1].strip())
-                                body_start = response.index(b'\r\n\r\n') + 4
-
-                        if content_length is not None and body_start is not None:
-                            if len(response) >= body_start + content_length:
-                                break
-                except socket.timeout:
-                    pass
-
-                response_str = response.decode()
+                response_str = read_response(sock).decode()
                 responses.append(response_str)
 
                 # Verify response
@@ -228,33 +203,7 @@ class TestHTTP10KeepAlive(unittest.TestCase):
                 request = f"GET /req{i} HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
                 sock.send(request.encode())
 
-                # Read response
-                response = b''
-                content_length = None
-                body_start = None
-
-                try:
-                    while True:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                        if b'\r\n\r\n' in response and content_length is None:
-                            headers = response.split(b'\r\n\r\n')[0].decode()
-                            if 'Content-Length:' in headers:
-                                content_length_line = [l for l in headers.split('\r\n')
-                                                       if 'Content-Length' in l][0]
-                                content_length = int(content_length_line.split(':')[1].strip())
-                                body_start = response.index(b'\r\n\r\n') + 4
-
-                        if content_length is not None and body_start is not None:
-                            if len(response) >= body_start + content_length:
-                                break
-                except socket.timeout:
-                    pass
-
-                response_str = response.decode()
+                response_str = read_response(sock).decode()
 
                 # Verify response
                 self.assertIn("200 OK", response_str)

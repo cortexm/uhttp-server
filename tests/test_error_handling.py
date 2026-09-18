@@ -4,9 +4,9 @@ Test error handling - malformed requests, invalid headers, HTTP errors
 """
 import unittest
 import socket
-import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 
 class TestErrorHandling(unittest.TestCase):
@@ -36,7 +36,7 @@ class TestErrorHandling(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -149,7 +149,7 @@ class TestErrorHandling(unittest.TestCase):
             b"POST /api HTTP/1.1\r\n"
             b"Host: localhost\r\n"
             b"Content-Type: application/json\r\n"
-            b"Content-Length: 20\r\n"
+            b"Content-Length: 19\r\n"  # the body below is 19 bytes
             b"Connection: close\r\n"
             b"\r\n"
             b'{invalid json here}'
@@ -158,7 +158,7 @@ class TestErrorHandling(unittest.TestCase):
         status, response = self.send_request_and_get_status(request)
 
         # Should get 400 for invalid JSON
-        self.assertTrue(status == 400 or status is None)
+        self.assertEqual(status, 400)
 
     def test_missing_host_header(self):
         """Test HTTP/1.1 request without Host header"""

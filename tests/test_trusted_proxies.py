@@ -6,6 +6,7 @@ import time
 import threading
 import json
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 
 class TestTrustedProxiesDisabled(unittest.TestCase):
@@ -36,7 +37,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -123,7 +124,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -307,7 +308,7 @@ class TestTrustedProxiesUntrustedSource(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -438,7 +439,7 @@ class TestTrustedProxyChain(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):

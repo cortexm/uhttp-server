@@ -8,6 +8,7 @@ import socket
 import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import read_response, wait_until_listening
 
 
 class TestPipeliningNotSupported(unittest.TestCase):
@@ -39,7 +40,7 @@ class TestPipeliningNotSupported(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -71,17 +72,11 @@ class TestPipeliningNotSupported(unittest.TestCase):
 
         sock.sendall(pipelined_requests)
 
-        # Read response
+        # Read the first response only. The server answers it and then
+        # neither answers the second request nor closes, so waiting for EOF
+        # would just burn the socket timeout.
         sock.settimeout(1.0)
-        all_data = b""
-        try:
-            while len(all_data) < 8192:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                all_data += chunk
-        except socket.timeout:
-            pass
+        all_data = read_response(sock)
 
         sock.close()
         time.sleep(0.2)

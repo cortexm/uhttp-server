@@ -7,6 +7,7 @@ import socket
 import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import read_response, wait_until_listening
 
 
 class TestKeepAlive(unittest.TestCase):
@@ -40,7 +41,7 @@ class TestKeepAlive(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -231,18 +232,10 @@ class TestKeepAlive(unittest.TestCase):
             )
             sock.sendall(pipelined)
 
-            # Read response
-            all_data = b""
-            try:
-                while len(all_data) < 8192:
-                    chunk = sock.recv(1024)
-                    if not chunk:
-                        break
-                    all_data += chunk
-            except socket.timeout:
-                pass
-
-            all_str = all_data.decode()
+            # Read the first response only: the server answers it and then
+            # neither answers the second request nor closes, so waiting for
+            # EOF would just burn the socket timeout
+            all_str = read_response(sock).decode()
 
             # Only first request processed, connection closed
             self.assertIn("/pipe1", all_str)

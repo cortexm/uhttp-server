@@ -17,10 +17,10 @@ Encoding sites in uhttp/server.py: encode_response_data(), _send(), respond().
 """
 import unittest
 import socket
-import time
 import json
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 # Slovak text with diacritics, exercises non-ASCII on every path
 TEXT = 'Košice ďáčé'
@@ -70,7 +70,7 @@ class TestUtf8Response(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):

@@ -9,6 +9,7 @@ import threading
 import tempfile
 import os
 from uhttp import server as uhttp_server
+from tests.testutils import read_response, wait_until_listening
 
 
 class TestRespondFile(unittest.TestCase):
@@ -80,7 +81,7 @@ class TestRespondFile(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -102,34 +103,7 @@ class TestRespondFile(unittest.TestCase):
 
     def _recv_full_response(self, sock):
         """Helper to receive full HTTP response"""
-        response = b''
-        content_length = None
-        body_start = None
-
-        while True:
-            try:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
-
-                if b'\r\n\r\n' in response and content_length is None:
-                    # Parse headers to get Content-Length
-                    headers = response.split(b'\r\n\r\n')[0].decode()
-                    if 'Content-Length:' in headers:
-                        content_length_line = [l for l in headers.split('\r\n')
-                                               if 'Content-Length' in l][0]
-                        content_length = int(content_length_line.split(':')[1].strip())
-                        body_start = response.index(b'\r\n\r\n') + 4
-
-                # Check if we have complete response
-                if content_length is not None and body_start is not None:
-                    if len(response) >= body_start + content_length:
-                        break
-            except socket.timeout:
-                break
-
-        return response
+        return read_response(sock)
 
     def test_small_file(self):
         """Test sending small text file"""

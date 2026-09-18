@@ -4,9 +4,9 @@ Test that multiple respond() calls are prevented
 """
 import unittest
 import socket
-import time
 import threading
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 
 class TestDoubleResponse(unittest.TestCase):
@@ -63,7 +63,7 @@ class TestDoubleResponse(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):

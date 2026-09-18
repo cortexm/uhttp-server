@@ -5,13 +5,13 @@ Tests for SSL/TLS support
 import unittest
 import socket
 import ssl
-import time
 import threading
 import json
 import subprocess
 import os
 import selectors
 from uhttp import server as uhttp_server
+from tests.testutils import wait_until_listening
 
 
 def ensure_test_certificates():
@@ -85,7 +85,7 @@ class TestSSL(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -306,7 +306,8 @@ class TestHTTPtoHTTPSRedirect(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_servers, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.5)
+        wait_until_listening(cls.HTTP_PORT)
+        wait_until_listening(cls.HTTPS_PORT)
 
     @classmethod
     def tearDownClass(cls):
