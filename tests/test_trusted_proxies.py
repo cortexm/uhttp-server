@@ -69,8 +69,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
             b"\r\n")
         time.sleep(0.2)
         self.assertIsNotNone(self.last_request)
-        self.assertEqual(self.last_request['remote_address'], '127.0.0.1:' + self.last_request['remote_address'].split(':')[1])
-        self.assertNotIn('10.0.0.1', self.last_request['remote_address'])
+        self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
 
     def test_socket_address_always_returns_socket_ip(self):
         """socket_address should always return socket IP"""
@@ -92,7 +91,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
             b"\r\n")
         time.sleep(0.2)
         self.assertIsNotNone(self.last_request)
-        self.assertNotIn('10.0.0.1', self.last_request['remote_addresses'])
+        self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
 
 class TestTrustedProxiesEnabled(unittest.TestCase):
@@ -159,8 +158,12 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
         self.assertIsNotNone(self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
-    def test_forwarded_for_first_ip(self):
-        """Should return first IP from X-Forwarded-For chain"""
+    def test_untrusted_hop_wins_over_spoofed_prefix(self):
+        """Client-written prefix must not shadow the hop a proxy appended
+
+        With $proxy_add_x_forwarded_for the proxy appends the peer IP, so
+        anything left of it is attacker-controlled.
+        """
         self.send_request(
             b"GET / HTTP/1.1\r\n"
             b"Host: localhost\r\n"
@@ -168,10 +171,10 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"\r\n")
         time.sleep(0.2)
         self.assertIsNotNone(self.last_request)
-        self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
+        self.assertEqual(self.last_request['remote_address'], '10.0.0.1')
 
     def test_remote_addresses_returns_full_chain(self):
-        """remote_addresses should return full X-Forwarded-For value"""
+        """remote_addresses should return the whole X-Forwarded-For chain"""
         self.send_request(
             b"GET / HTTP/1.1\r\n"
             b"Host: localhost\r\n"
@@ -180,17 +183,54 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
         time.sleep(0.2)
         self.assertIsNotNone(self.last_request)
         self.assertEqual(
-            self.last_request['remote_addresses'], '203.0.113.50, 10.0.0.1')
+            self.last_request['remote_addresses'], ['203.0.113.50', '10.0.0.1'])
+
+    def test_empty_chain_entries_are_dropped(self):
+        """Empty items must not be taken for an untrusted hop"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 203.0.113.50, , \r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
+        self.assertEqual(
+            self.last_request['remote_addresses'], ['203.0.113.50'])
+
+    def test_chain_of_only_empty_entries_falls_back_to_socket(self):
+        """A header with nothing usable must not produce an empty chain"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: ,\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
+        self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
+
+    def test_ipv4_mapped_chain_entry_is_normalized(self):
+        """An IPv4-mapped entry must match trusted_proxies and read plainly"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: ::ffff:203.0.113.50\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
     def test_no_forwarded_header_falls_back_to_socket(self):
-        """Without X-Forwarded-For, should return socket address"""
+        """Without X-Forwarded-For, should return socket IP"""
         self.send_request(
             b"GET / HTTP/1.1\r\n"
             b"Host: localhost\r\n"
             b"\r\n")
         time.sleep(0.2)
         self.assertIsNotNone(self.last_request)
-        self.assertTrue(self.last_request['remote_address'].startswith('127.0.0.1:'))
+        self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
+        self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
     def test_socket_address_unaffected_by_trusted_proxies(self):
         """socket_address should always return socket IP regardless of config"""
@@ -267,8 +307,98 @@ class TestTrustedProxiesUntrustedSource(unittest.TestCase):
             b"\r\n")
         time.sleep(0.2)
         self.assertIsNotNone(self.last_request)
-        self.assertTrue(self.last_request['remote_address'].startswith('127.0.0.1:'))
-        self.assertNotIn('203.0.113.50', self.last_request['remote_address'])
+        self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
+        self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
+
+
+class TestTrustedProxyChain(unittest.TestCase):
+    """Test right-to-left walk over a chain of several trusted proxies"""
+
+    server = None
+    server_thread = None
+    last_request = None
+    PORT = 9963
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = uhttp_server.HttpServer(
+            port=cls.PORT, trusted_proxies=['127.0.0.1', '10.0.0.1'])
+
+        def run_server():
+            try:
+                while cls.server:
+                    client = cls.server.wait(timeout=0.1)
+                    if client:
+                        cls.last_request = {
+                            'remote_address': client.remote_address,
+                            'remote_addresses': client.remote_addresses,
+                            'socket_address': client.socket_address,
+                        }
+                        client.respond({'status': 'ok'})
+            except Exception:
+                pass
+
+        cls.server_thread = threading.Thread(target=run_server, daemon=True)
+        cls.server_thread.start()
+        time.sleep(0.5)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.server:
+            cls.server.close()
+            cls.server = None
+
+    def send_request(self, request_bytes):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2.0)
+        sock.connect(('localhost', self.PORT))
+        sock.sendall(request_bytes)
+        response = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+            if b"\r\n\r\n" in response:
+                break
+        sock.close()
+        return response
+
+    def test_trusted_hops_are_skipped(self):
+        """First hop that is not a trusted proxy is the client"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 203.0.113.50, 10.0.0.1\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
+
+    def test_spoofed_prefix_is_ignored(self):
+        """Entries the client prepended stay left of the real hop"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 1.2.3.4, 203.0.113.50, 10.0.0.1\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
+        self.assertEqual(
+            self.last_request['remote_addresses'],
+            ['1.2.3.4', '203.0.113.50', '10.0.0.1'])
+
+    def test_all_hops_trusted_falls_back_to_nearest(self):
+        """With no untrusted hop the nearest one is returned, never nothing"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 10.0.0.1\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
 
 
 if __name__ == '__main__':

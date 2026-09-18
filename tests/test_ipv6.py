@@ -78,6 +78,7 @@ class TestDualStack(unittest.TestCase):
                     if client:
                         client.respond({
                             'remote': client.remote_address,
+                            'socket': client.socket_address,
                             'path': client.path
                         })
             except Exception:
@@ -117,6 +118,8 @@ class TestDualStack(unittest.TestCase):
             response = client.recv(4096)
             self.assertIn(b'200 OK', response)
             self.assertIn(b'::1', response)
+            # RFC 3986 bracketed form, so ip:port stays parsable
+            self.assertIn(b'[::1]:', response)
         except OSError as e:
             if 'Cannot assign' in str(e):
                 self.skipTest("IPv6 loopback not available")
@@ -126,49 +129,20 @@ class TestDualStack(unittest.TestCase):
 
 
 class TestRemoteAddressNormalization(unittest.TestCase):
-    """Test remote_address normalization for IPv4-mapped addresses"""
+    """Test address normalization for IPv4-mapped addresses"""
 
     def test_ipv4_mapped_normalization(self):
         """Test that ::ffff:x.x.x.x is normalized to x.x.x.x"""
-        # Create a mock connection to test the property
-        server = uhttp_server.HttpServer(port=9998)
-
-        # Simulate IPv4-mapped address from accept()
-        class MockConnection:
-            def __init__(self):
-                self._addr = ('::ffff:192.168.1.100', 12345)
-                self._headers = {}
-
-            def headers_get_attribute(self, name):
-                return self._headers.get(name)
-
-        conn = MockConnection()
-        # Bind the property method
-        conn.remote_address = property(
-            lambda self: uhttp_server.HttpConnection.remote_address.fget(self))
-
-        # Test directly using the logic
-        addr = conn._addr[0]
-        if addr.startswith('::ffff:'):
-            addr = addr[7:]
-        result = f"{addr}:{conn._addr[1]}"
-
-        self.assertEqual(result, '192.168.1.100:12345')
-        server.close()
+        self.assertEqual(
+            uhttp_server.unmap_ipv4('::ffff:192.168.1.100'), '192.168.1.100')
 
     def test_ipv6_address_unchanged(self):
         """Test that pure IPv6 addresses are not modified"""
-        addr = '::1'
-        if addr.startswith('::ffff:'):
-            addr = addr[7:]
-        self.assertEqual(addr, '::1')
+        self.assertEqual(uhttp_server.unmap_ipv4('::1'), '::1')
 
     def test_ipv4_address_unchanged(self):
         """Test that pure IPv4 addresses are not modified"""
-        addr = '192.168.1.1'
-        if addr.startswith('::ffff:'):
-            addr = addr[7:]
-        self.assertEqual(addr, '192.168.1.1')
+        self.assertEqual(uhttp_server.unmap_ipv4('192.168.1.1'), '192.168.1.1')
 
 
 if __name__ == '__main__':

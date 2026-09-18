@@ -192,6 +192,34 @@ owners' ready keys.
 `selectors` is not in the MicroPython standard library, so 3.x is CPython-only
 until a shim lands. Stay on 2.x on-device.
 
+## Migrating from 3.1 to 3.2
+
+The client address properties changed shape — a breaking change inside 3.x,
+because the old ones could not express an IPv6 address unambiguously and the
+`X-Forwarded-For` handling was spoofable. See
+[Behind a reverse proxy](#behind-a-reverse-proxy) for the new rule.
+
+| | 3.1 | 3.2 |
+|---|---|---|
+| `remote_address` | `'ip:port'`, or bare `'ip'` from `X-Forwarded-For` | always bare `'ip'` |
+| `remote_addresses` | `'a, b'` string, or `'ip:port'` | `['a', 'b']`, or `[socket_ip]` |
+| `socket_address` | `'2001:db8::1:8080'` | `'[2001:db8::1]:8080'` |
+
+```python
+# 3.1
+ip = client.remote_address.rsplit(':', 1)[0]      # broken for IPv6
+chain = client.remote_addresses.split(',')
+
+# 3.2
+ip = client.remote_address
+chain = client.remote_addresses
+port = client.addr[1]                             # if you really need it
+```
+
+`remote_address` can also return a **different** address than it did in 3.1:
+with a multi-hop proxy chain it is now the rightmost untrusted hop, so list
+every proxy in `trusted_proxies` or the walk stops at the one you omitted.
+
 ## SSL/HTTPS Support
 
 uHTTP supports SSL/TLS encryption for HTTPS connections on both CPython and MicroPython.
@@ -414,7 +442,7 @@ Parameters:
   - `max_ws_message_length` - Maximum WebSocket message size before chunking (default: 64KB)
   - `file_chunk_size` - Chunk size in bytes for streaming file responses (default: 4KB)
   - `listen` - Listening socket backlog (default: 8)
-  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `remote_address` uses `X-Forwarded-For` header for connections from these IPs. When not set, `X-Forwarded-For` is ignored.
+  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `X-Forwarded-For` is honoured for connections from these IPs; when not set it is ignored entirely. List **every** proxy in the chain, not just the one the server talks to — see [Behind a reverse proxy](#behind-a-reverse-proxy).
   - `selector` - A `selectors.BaseSelector` to register sockets in (default: a `DefaultSelector` the server owns and closes). Pass the same instance to several servers (and register your own sockets in it) to drive them from one loop.
 
 #### Properties:
@@ -462,15 +490,15 @@ Parameters:
 
 **`socket_address(self)`**
 
-- Client socket address as string `ip:port` (always socket IP, ignores `X-Forwarded-For`)
+- Client socket address as string `ip:port`, always the socket IP, ignores `X-Forwarded-For`. IPv6 is bracketed per RFC 3986: `[2001:db8::1]:8080`
 
 **`remote_address(self)`**
 
-- Client remote address. Returns first IP from `X-Forwarded-For` if connection is from `trusted_proxies`, otherwise socket address.
+- Client IP address as string, without port. The last hop in `remote_addresses` that is not in `trusted_proxies`, counted from the right. Falls back to the socket IP when every hop is trusted, so it is never empty.
 
 **`remote_addresses(self)`**
 
-- Full `X-Forwarded-For` chain if from trusted proxy, otherwise socket address.
+- The `X-Forwarded-For` chain as a list of IP strings, client first and last proxy last — the same shape as Werkzeug's `access_route` or Express's `req.ips`. Falls back to `[socket_ip]` when the header is absent or the socket peer is not a trusted proxy. Entries left of `remote_address` are **not** trustworthy — use `remote_address` for anything that makes a decision.
 
 **`method(self)`**
 
@@ -1062,6 +1090,47 @@ server = uhttp.server.HttpServer(address='::', port=80)
 # IPv6 only
 server = uhttp.server.HttpServer(address='::1', port=80)
 ```
+
+
+## Behind a reverse proxy
+
+By default `X-Forwarded-For` is ignored — the header is client-supplied, so
+trusting it without a proxy in front is an open invitation to spoof any IP.
+Pass `trusted_proxies` to honour it:
+
+```python
+server = uhttp.server.HttpServer(port=8080, trusted_proxies=['127.0.0.1'])
+```
+
+The client address is resolved by walking the chain **from the socket peer
+leftwards** and taking the first hop that is not a trusted proxy — the same
+rule as nginx's `realip` module with `set_real_ip_from` and
+`real_ip_recursive on`:
+
+```
+X-Forwarded-For: 1.2.3.4, 203.0.113.50, 10.0.0.1     socket peer: 127.0.0.1
+                 ^spoofed  ^client        ^proxy hop  ^proxy hop
+trusted_proxies=['127.0.0.1', '10.0.0.1'] -> remote_address == '203.0.113.50'
+```
+
+A client can prepend anything to the header, but it cannot forge the hops a
+proxy appended after it — so going right-to-left is what makes this
+spoof-proof. Taking the leftmost entry instead would be safe only with
+`proxy_set_header X-Forwarded-For $remote_addr;` (which overwrites the header)
+and wide open with the far more common `$proxy_add_x_forwarded_for` (which
+appends to it).
+
+**List every proxy in the chain**, not just the one the server talks to. An
+intermediate hop missing from `trusted_proxies` is where the walk stops, and
+that proxy's own IP becomes `remote_address`. If all hops are trusted, the
+nearest one is returned — `remote_address` is never empty.
+
+`remote_addresses` gives the whole chain including the entries left of the
+client, which is useful in a log but must not decide anything: only
+`remote_address` and what follows it in the list is trustworthy. It holds the
+header only — the socket peer stays in `socket_address`, the way Werkzeug
+keeps `access_route` separate from `remote_addr` and nginx keeps
+`$realip_remote_addr` separate from `$remote_addr`.
 
 
 ## Development

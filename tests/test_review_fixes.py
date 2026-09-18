@@ -181,7 +181,8 @@ class TestForwardedForJoin(unittest.TestCase):
             self.assertIsNotNone(client)
             self.assertIn('10.0.0.1', client.remote_addresses)
             self.assertIn('10.0.0.2', client.remote_addresses)
-            self.assertEqual(client.remote_address, '10.0.0.1')
+            # rightmost untrusted hop, both header lines are in the chain
+            self.assertEqual(client.remote_address, '10.0.0.2')
         finally:
             sock.close()
             server.close()

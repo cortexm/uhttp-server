@@ -303,6 +303,13 @@ def parse_url(url):
     return path, query
 
 
+def unmap_ipv4(address):
+    """Strip IPv4-mapped IPv6 prefix: ::ffff:192.0.2.1 -> 192.0.2.1"""
+    if address.startswith('::ffff:'):
+        return address[7:]
+    return address
+
+
 def parse_header_line(line):
     """Parse header line to key and value"""
     try:
@@ -834,48 +841,56 @@ class HttpConnection(_WsFrameMixin):
         return self._addr
 
     @property
+    def _socket_ip(self):
+        return unmap_ipv4(self._addr[0])
+
+    @property
     def socket_address(self):
-        """Return socket address (without X-Forwarded-For)"""
-        addr = self._addr[0]
-        if addr.startswith('::ffff:'):
-            addr = addr[7:]  # Remove IPv4-mapped prefix
+        """Return socket address as `ip:port` (ignores X-Forwarded-For)
+
+        IPv6 is bracketed per RFC 3986: `[2001:db8::1]:8080`
+        """
+        addr = self._socket_ip
+        if ':' in addr:
+            addr = f"[{addr}]"
         return f"{addr}:{self._addr[1]}"
 
     @property
-    def remote_address(self):
-        """Return client address
+    def remote_addresses(self):
+        """Return the X-Forwarded-For chain, client first, last proxy last
 
-        If trusted_proxies is configured and connection comes from
-        a trusted proxy, returns first address from X-Forwarded-For.
-        Otherwise returns socket address.
+        The header is used only when the socket peer is a trusted proxy,
+        otherwise the result is just the socket IP. Only the part from
+        `remote_address` rightwards is trustworthy — entries left of it come
+        from a header the client may have written itself.
         """
-        if self._server._trusted_proxies:
-            addr = self._addr[0]
-            if addr.startswith('::ffff:'):
-                addr = addr[7:]
-            if addr in self._server._trusted_proxies:
-                forwarded = self.headers_get_attribute('x-forwarded-for')
-                if forwarded:
-                    return forwarded.split(',')[0].strip()
-        return self.socket_address
+        proxies = self._server._trusted_proxies
+        if proxies and self._socket_ip in proxies:
+            forwarded = self.headers_get_attribute('x-forwarded-for')
+            if forwarded:
+                addresses = [
+                    unmap_ipv4(addr.strip())
+                    for addr in forwarded.split(',') if addr.strip()
+                ]
+                if addresses:
+                    return addresses
+        return [self._socket_ip]
 
     @property
-    def remote_addresses(self):
-        """Return all client addresses from X-Forwarded-For
+    def remote_address(self):
+        """Return client IP address (no port)
 
-        If trusted_proxies is configured and connection comes from
-        a trusted proxy, returns X-Forwarded-For value.
-        Otherwise returns socket address.
+        Walks the address chain from the socket peer leftwards and returns
+        the first hop that is not a trusted proxy. Going right-to-left is
+        what makes this spoof-proof: a client can prepend anything to
+        X-Forwarded-For, but it cannot forge the hops a proxy appended
+        after it.
         """
-        if self._server._trusted_proxies:
-            addr = self._addr[0]
-            if addr.startswith('::ffff:'):
-                addr = addr[7:]
-            if addr in self._server._trusted_proxies:
-                forwarded = self.headers_get_attribute('x-forwarded-for')
-                if forwarded:
-                    return forwarded
-        return f"{self._addr[0]}:{self._addr[1]}"
+        proxies = self._server._trusted_proxies or ()
+        for addr in reversed(self.remote_addresses):
+            if addr not in proxies:
+                return addr
+        return self._socket_ip
 
     @property
     def is_secure(self):
