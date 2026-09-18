@@ -1502,6 +1502,11 @@ class HttpConnection(_WsFrameMixin):
             else:
                 self._error = str(err)
                 self._event = EVENT_ERROR
+                # Same reason as in process_request_event(), but here the
+                # buffer is what re-triggers: it is left untouched, so
+                # without closing both wait() and the documented
+                # `while client.next():` drain would repeat this forever.
+                self.close()
             return True
         return False
 
@@ -1665,17 +1670,17 @@ class HttpConnection(_WsFrameMixin):
             self._event = EVENT_ERROR
             return True
         except ClientError as err:
-            # Client disconnect on keep-alive while waiting for next request
-            # is normal - just close silently
-            if self._requests_count > 0 and self._method is None:
-                self.close()
-                return None
-            self._error = str(err)
-            self._event = EVENT_ERROR
             # The peer is gone. Leaving the socket registered would report it
             # readable on every tick and re-emit this event forever, so the
             # loop spins at 100% CPU unless the application closes by hand.
             self.close()
+            if isinstance(err, HttpDisconnected) and self._method is None:
+                # Left before a complete request line: nothing was asked and
+                # nothing can be answered, so a port scan or a health check
+                # is not an application event.
+                return None
+            self._error = str(err)
+            self._event = EVENT_ERROR
             return True
 
     def _process_event(self):

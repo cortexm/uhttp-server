@@ -234,6 +234,12 @@ In 3.1 it silently accepted a one-way response (SSE, multipart), where it only
 blinded the peer-close probe, or a request still arriving, where it replaced
 the short request timeout with the longer keep-alive one.
 
+Event mode no longer emits `EVENT_ERROR` for a peer that disconnects **before
+sending a request line** — a port scan or a health check now costs nothing
+instead of an event per probe. A disconnect after the request line (an upload
+that dies mid-body) still reports it, on an already-closed connection, so an
+application that answered `EVENT_ERROR` should clean up instead of replying.
+
 ## SSL/HTTPS Support
 
 uHTTP supports SSL/TLS encryption for HTTPS connections on both CPython and MicroPython.
@@ -1080,6 +1086,13 @@ while True:
     elif client.event == EVENT_ERROR:
         print(f"Error: {client.error}")
 ```
+
+**`EVENT_ERROR` arrives on an already-closed connection when the peer is
+gone** — `client.error` still reads, but `respond()` is a no-op, so clean up
+rather than reply. A peer that disconnects *before* sending a request line
+(port scan, load balancer health check) produces **no event at all**: nothing
+was asked and nothing can be answered. A malformed request from a live peer
+still reports `EVENT_ERROR`.
 
 For file uploads, use `to_file` parameter:
 

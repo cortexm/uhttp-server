@@ -512,14 +512,23 @@ class TestEventModeDisconnect(unittest.TestCase):
 
     PORT = 9968
 
-    def test_disconnect_emits_one_error_event(self):
-        """EVENT_ERROR is emitted once and the connection is closed
+    def _drain(self, server, ticks=20):
+        """Return the events emitted over `ticks` loop passes"""
+        events = []
+        for _ in range(ticks):
+            client = server.wait(timeout=0.05)
+            if client:
+                events.append(client.event)
+        return events
 
-        The application is not required to close on EVENT_ERROR (the README
-        example only prints the error), so a connection left registered at
-        EOF would be reported readable on every tick and re-emit the event
-        forever — a port scanner or a load balancer health check was enough
-        to pin a core at 100%.
+    def test_disconnect_before_request_is_silent(self):
+        """A connect-and-leave produces no event and leaves nothing behind
+
+        Nothing was asked, so there is nothing for the application to handle
+        or answer — a port scanner or a load balancer health check should not
+        reach it at all. The connection must still be closed: at EOF a
+        registered socket is reported readable on every tick, which used to
+        re-emit EVENT_ERROR forever and pin a core at 100%.
         """
         server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
         try:
@@ -527,15 +536,66 @@ class TestEventModeDisconnect(unittest.TestCase):
             sock.connect(('localhost', self.PORT))
             sock.close()
 
-            events = []
+            self.assertEqual(self._drain(server), [])
+            self.assertEqual(server._waiting_connections, [])
+            # listening socket only: the dead peer is off the selector
+            self.assertEqual(len(server.selector.get_map()), 1)
+        finally:
+            server.close()
+
+    def test_disconnect_during_body_reports_error_and_stops_draining(self):
+        """An upload that dies mid-body must reach the application once
+
+        Silencing the pre-request disconnect must not silence this one: the
+        application may have opened a file or allocated state on
+        EVENT_HEADERS and needs to know the body will never arrive.
+
+        The unread body bytes stay in the buffer, so this surfaces through
+        next() rather than through a readiness event. next() must close too,
+        or it keeps reporting the same error: both wait() and the documented
+        `while client.next():` drain would loop on it forever.
+        """
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect(('localhost', self.PORT))
+            sock.sendall(
+                b"POST /u HTTP/1.1\r\nHost: localhost\r\n"
+                b"Content-Length: 100\r\n\r\npartial")
+            client = None
             for _ in range(20):
                 client = server.wait(timeout=0.05)
                 if client:
-                    events.append(client.event)
+                    break
+            self.assertEqual(client.event, EVENT_HEADERS)
+            client.accept_body()
+            sock.close()
 
-            self.assertEqual(events, [EVENT_ERROR])
+            # Poll next() until the FIN is observable, rather than sleeping
+            # for it: before then it simply has no event to report.
+            deadline = time.monotonic() + 2.0
+            while not client.next():
+                self.assertLess(
+                    time.monotonic(), deadline, "disconnect never surfaced")
+            self.assertEqual(client.event, EVENT_ERROR)
+            self.assertIsNone(client._socket)
+            self.assertFalse(client.next())     # the drain terminates
             self.assertEqual(server._waiting_connections, [])
         finally:
+            server.close()
+
+    def test_malformed_request_line_still_reports_error(self):
+        """Garbage from a live peer is an error, not a silent close"""
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(('localhost', self.PORT))
+            sock.sendall(b"GARBAGE-NO-SPACES\r\n\r\n")
+
+            events = self._drain(server)
+            self.assertEqual(events, [EVENT_ERROR])
+        finally:
+            sock.close()
             server.close()
 
 
