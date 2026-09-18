@@ -1672,6 +1672,10 @@ class HttpConnection(_WsFrameMixin):
                 return None
             self._error = str(err)
             self._event = EVENT_ERROR
+            # The peer is gone. Leaving the socket registered would report it
+            # readable on every tick and re-emit this event forever, so the
+            # loop spins at 100% CPU unless the application closes by hand.
+            self.close()
             return True
 
     def _process_event(self):
