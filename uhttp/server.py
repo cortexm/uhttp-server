@@ -1374,11 +1374,14 @@ class HttpConnection(_WsFrameMixin):
 
         pause_reading() also drops READ: with nothing left to watch the
         socket is unregistered so its kernel buffer fills and TCP stalls the
-        peer (backpressure). resume_reading() re-registers it. Registration
-        is owned by _accept()/resume_reading(); this only ever modifies or
-        unregisters an already-registered socket (_interest is None -> skip).
+        peer (backpressure). While paused it stays re-registerable, because a
+        send from application code still has to arm WRITE — otherwise those
+        bytes would sit unsent until resume_reading(). Outside a pause,
+        registration is owned by _accept(): an unregistered socket is skipped.
         """
-        if self._socket is None or self._interest is None:
+        if self._socket is None or self._detached:
+            return
+        if self._interest is None and not self._read_paused:
             return
         want = 0
         read_ok = (not self._response_started
@@ -1394,7 +1397,8 @@ class HttpConnection(_WsFrameMixin):
             want = _selectors.EVENT_READ  # a mask of 0 is not selectable
         if want == self._interest:
             return
-        if self._selector_call('modify', want, self):
+        method = 'register' if self._interest is None else 'modify'
+        if self._selector_call(method, want, self):
             self._interest = want
         else:
             self.close()  # can't be re-armed: it would hang forever
@@ -1407,12 +1411,25 @@ class HttpConnection(_WsFrameMixin):
         buffer fills and TCP stalls the sender. Outbound sending is
         unaffected.
 
+        Needs an inbound stream to throttle: WebSocket mode or a body
+        accepted with accept_body*(). Pausing a one-way response (SSE,
+        multipart) would only blind its peer-close probe, and pausing while
+        the request is still arriving would trade the request timeout for the
+        longer keep-alive one, so both raise.
+
         timeout: seconds the connection may stay paused before maintenance()
         closes it as a stuck consumer. None uses the keep-alive timeout; a
         value <= 0 disables the deadline (the application owns the lifecycle).
         A slow-but-alive consumer that resumes and drains periodically keeps
         the connection alive, since each read refreshes the activity clock.
+        The deadline is only as precise as maintenance(), which scans at most
+        once per half the shortest configured timeout.
         """
+        if self._detached or not (self._ws_mode or self._streaming_body):
+            raise HttpError(
+                "pause_reading() needs an inbound stream: WebSocket mode or "
+                "accept_body*(); a detached WebSocket pauses through its "
+                "own object")
         self._read_paused = True
         self._read_pause_timeout = timeout
         self._update_interest()
@@ -1422,10 +1439,12 @@ class HttpConnection(_WsFrameMixin):
         self._read_paused = False
         self._read_pause_timeout = None
         self.update_activity()
-        if self._socket is not None and not self._detached:
-            if self._interest is None:
-                self._register()
-            self._update_interest()
+        if self._socket is None or self._detached:
+            return
+        if self._interest is None and not self._register():
+            self.close()  # nothing could wake it again
+            return
+        self._update_interest()
 
     def handle_event(self, fileobj, mask):
         """Owner dispatch for a selector event.

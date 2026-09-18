@@ -5,6 +5,7 @@ Not reading a socket lets its kernel buffer fill so TCP stalls the peer. These
 tests drive the observable state machine (selector interest, event delivery,
 the stuck-consumer guard) rather than TCP window internals.
 """
+import selectors
 import socket
 import time
 import unittest
@@ -164,6 +165,109 @@ class TestPauseUpload(unittest.TestCase):
                 if chunk:
                     body += chunk
             self.assertEqual(bytes(body), b'abcdefghij')
+        finally:
+            sock.close()
+            server.close()
+
+
+class TestPauseEgress(unittest.TestCase):
+    """A pause throttles the peer, it must not stall our own sending."""
+
+    PORT = 9976
+
+    def test_send_while_paused_arms_write_and_flushes(self):
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        sock = _connect(self.PORT)
+        try:
+            sock.sendall(WS_UPGRADE)
+            client = _drive(server)
+            client.accept_websocket()
+            server.wait(0.05)                     # flush the 101 handshake
+            sock.settimeout(1.0)
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                resp += sock.recv(256)
+
+            client.pause_reading()
+            self.assertIsNone(client._interest)   # unregistered while idle
+
+            # A socket that cannot drain in one go: the send buffer keeps data,
+            # so WRITE has to be armed even though reading stays paused.
+            client._flush_send_buffer = lambda: False
+            client.ws_send('x' * 200)
+            self.assertTrue(client.send_buffer_size)
+            self.assertTrue(client._interest & selectors.EVENT_WRITE)
+            registered = [
+                k.fileobj for k in server.selector.get_map().values()]
+            self.assertIn(client.socket, registered)
+
+            # Let it drain: the bytes must arrive without resume_reading().
+            del client._flush_send_buffer
+            payload = b""
+            for _ in range(20):
+                server.wait(0.05)
+                try:
+                    payload += sock.recv(4096)
+                except socket.timeout:
+                    pass
+                if len(payload) >= 202:
+                    break
+            self.assertEqual(payload[0], 0x81)    # FIN | text
+            self.assertIn(b'x' * 200, payload)
+            self.assertTrue(client._read_paused)  # still paused throughout
+        finally:
+            sock.close()
+            server.close()
+
+    def test_resume_closes_connection_when_register_fails(self):
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        sock = _connect(self.PORT)
+        try:
+            sock.sendall(WS_UPGRADE)
+            client = _drive(server)
+            client.accept_websocket()
+            client.pause_reading()
+            self.assertIsNone(client._interest)
+
+            def boom(*args, **kwargs):
+                raise OSError("selector is gone")
+
+            server.selector.register = boom
+            client.resume_reading()
+            self.assertIsNone(client._socket)     # closed, not left unwatched
+        finally:
+            sock.close()
+            server.close()
+
+
+class TestPauseRequiresInboundStream(unittest.TestCase):
+    """Only a WebSocket or an accepted body has anything to throttle."""
+
+    PORT = 9977
+
+    def test_plain_request_cannot_pause(self):
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        sock = _connect(self.PORT)
+        try:
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            client = _drive(server)
+            with self.assertRaises(uhttp_server.HttpError):
+                client.pause_reading()
+            self.assertFalse(client._read_paused)
+        finally:
+            sock.close()
+            server.close()
+
+    def test_streaming_response_cannot_pause(self):
+        server = uhttp_server.HttpServer(port=self.PORT, event_mode=True)
+        sock = _connect(self.PORT)
+        try:
+            sock.sendall(b"GET /sse HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            client = _drive(server)
+            self.assertTrue(client.response_stream())
+            with self.assertRaises(uhttp_server.HttpError):
+                client.pause_reading()   # would blind the peer-close probe
+            self.assertFalse(client._read_paused)
         finally:
             sock.close()
             server.close()

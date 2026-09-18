@@ -220,6 +220,12 @@ port = client.addr[1]                             # if you really need it
 with a multi-hop proxy chain it is now the rightmost untrusted hop, so list
 every proxy in `trusted_proxies` or the walk stops at the one you omitted.
 
+`pause_reading()` now raises `HttpError` unless the connection has something
+inbound to throttle — WebSocket mode, or a body accepted with `accept_body*()`.
+In 3.1 it silently accepted a one-way response (SSE, multipart), where it only
+blinded the peer-close probe, or a request still arriving, where it replaced
+the short request timeout with the longer keep-alive one.
+
 ## SSL/HTTPS Support
 
 uHTTP supports SSL/TLS encryption for HTTPS connections on both CPython and MicroPython.
@@ -714,8 +720,9 @@ client.headers_all('accept')   # ['text/html, application/xml', 'text/plain']
 
 **`pause_reading(self, timeout=None)`**
 
-- Stop reading from the socket so its kernel buffer fills and TCP stalls the peer (inbound backpressure). Use when the application cannot keep up with an inbound WebSocket stream or a request-body upload. Outbound sending is unaffected.
-- `timeout` - seconds the connection may stay paused before `maintenance()` closes it as a stuck consumer. `None` (default) uses the keep-alive timeout; a value `<= 0` disables the deadline (the application owns the lifecycle). A slow-but-alive consumer that resumes and drains periodically stays alive, since each read refreshes the activity clock.
+- Stop reading from the socket so its kernel buffer fills and TCP stalls the peer (inbound backpressure). Use when the application cannot keep up with an inbound WebSocket stream or a request-body upload. Outbound sending is unaffected — a send while paused arms write interest as usual and flushes without resuming.
+- Raises `HttpError` unless there is an inbound stream to throttle: WebSocket mode, or a body accepted with `accept_body*()`. A detached (non-event) WebSocket pauses through its own object.
+- `timeout` - seconds the connection may stay paused before `maintenance()` closes it as a stuck consumer. `None` (default) uses the keep-alive timeout; a value `<= 0` disables the deadline (the application owns the lifecycle). A slow-but-alive consumer that resumes and drains periodically stays alive, since each read refreshes the activity clock. The deadline is only as precise as `maintenance()`, which scans at most once per half the shortest configured timeout.
 
 **`resume_reading(self)`**
 
@@ -987,8 +994,13 @@ fills and TCP stalls the peer — no application-level protocol needed. Outbound
 sending is unaffected, so a paused connection can still send.
 
 `pause_reading(timeout=None)` drops the socket's read interest; `resume_reading()`
-re-arms it. A paused connection that never drains is closed by `maintenance()`
-as a stuck-consumer guard: `timeout=None` uses the keep-alive timeout, a value
+re-arms it. It needs an inbound stream to throttle — WebSocket mode, or a body
+accepted with `accept_body*()` — and raises `HttpError` otherwise, because
+pausing a one-way response only blinds its peer-close probe and pausing a
+request still arriving trades the short request timeout for the keep-alive one.
+
+A paused connection that never drains is closed by `maintenance()` as a
+stuck-consumer guard: `timeout=None` uses the keep-alive timeout, a value
 `<= 0` disables the deadline (you own the lifecycle). A slow-but-alive consumer
 that resumes and drains periodically stays alive, because each read refreshes
 the activity clock — this is the pattern for forwarding to a slow sink (a
