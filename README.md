@@ -220,6 +220,14 @@ port = client.addr[1]                             # if you really need it
 with a multi-hop proxy chain it is now the rightmost untrusted hop, so list
 every proxy in `trusted_proxies` or the walk stops at the one you omitted.
 
+`trusted_proxies` given as a plain string now raises `ValueError` instead of
+matching by substring — pass a list even for a single proxy:
+
+```python
+HttpServer(port=80, trusted_proxies='10.0.0.1')     # 3.2: ValueError
+HttpServer(port=80, trusted_proxies=['10.0.0.1'])   # correct
+```
+
 `pause_reading()` now raises `HttpError` unless the connection has something
 inbound to throttle — WebSocket mode, or a body accepted with `accept_body*()`.
 In 3.1 it silently accepted a one-way response (SSE, multipart), where it only
@@ -448,7 +456,7 @@ Parameters:
   - `max_ws_message_length` - Maximum WebSocket message size before chunking (default: 64KB)
   - `file_chunk_size` - Chunk size in bytes for streaming file responses (default: 4KB)
   - `listen` - Listening socket backlog (default: 8)
-  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `X-Forwarded-For` is honoured for connections from these IPs; when not set it is ignored entirely. List **every** proxy in the chain, not just the one the server talks to — see [Behind a reverse proxy](#behind-a-reverse-proxy).
+  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `X-Forwarded-For` is honoured for connections from these IPs; when not set it is ignored entirely. List **every** proxy in the chain, not just the one the server talks to — see [Behind a reverse proxy](#behind-a-reverse-proxy). A plain string raises `ValueError`: `'10.0.0.1' in '110.0.0.10'` is True, so a string would match by substring and forge trust.
   - `selector` - A `selectors.BaseSelector` to register sockets in (default: a `DefaultSelector` the server owns and closes). Pass the same instance to several servers (and register your own sockets in it) to drive them from one loop.
 
 #### Properties:

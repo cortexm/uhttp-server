@@ -311,6 +311,34 @@ class TestTrustedProxiesUntrustedSource(unittest.TestCase):
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
 
+class TestTrustedProxiesValidation(unittest.TestCase):
+    """A str config would silently turn membership into substring matching"""
+
+    PORT = 9964
+
+    def test_string_is_rejected(self):
+        with self.assertRaises(ValueError):
+            uhttp_server.HttpServer(
+                port=self.PORT, trusted_proxies='192.168.1.10')
+
+    def test_any_iterable_is_accepted(self):
+        for proxies in (
+                ['127.0.0.1'], ('127.0.0.1',), {'127.0.0.1'}):
+            server = uhttp_server.HttpServer(
+                port=self.PORT, trusted_proxies=proxies)
+            try:
+                self.assertEqual(server._trusted_proxies, {'127.0.0.1'})
+            finally:
+                server.close()
+
+    def test_empty_config_disables_forwarded_for(self):
+        server = uhttp_server.HttpServer(port=self.PORT, trusted_proxies=[])
+        try:
+            self.assertIsNone(server._trusted_proxies)
+        finally:
+            server.close()
+
+
 class TestTrustedProxyChain(unittest.TestCase):
     """Test right-to-left walk over a chain of several trusted proxies"""
 

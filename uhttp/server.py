@@ -2292,7 +2292,13 @@ class HttpServer():
                 returns clients at different stages (headers, data, complete).
                 If False (default), wait() only returns fully loaded requests.
         """
-        self._trusted_proxies = kwargs.pop('trusted_proxies', None)
+        proxies = kwargs.pop('trusted_proxies', None)
+        if isinstance(proxies, str):
+            # a str would make the membership tests substring matches:
+            # '92.168.1.1' in '192.168.1.10' is True, trust would be forged
+            raise ValueError(
+                "trusted_proxies must be a list of IP addresses, not a str")
+        self._trusted_proxies = set(proxies) if proxies else None
         # Shared selector may be passed in; an owned one is closed in close().
         selector = kwargs.pop('selector', None)
         self._owns_selector = selector is None
