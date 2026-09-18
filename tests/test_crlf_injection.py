@@ -50,6 +50,9 @@ class TestCrlfInjection(unittest.TestCase):
                             elif path == '/redirect-crlf':
                                 client.respond_redirect(
                                     'http://evil.com\r\nInjected: true')
+                            elif path == '/multipart-crlf':
+                                client.response_multipart(
+                                    headers={'X-User': 'a\r\nInjected: true'})
                             elif path == '/clean':
                                 client.respond(
                                     'ok',
@@ -94,35 +97,56 @@ class TestCrlfInjection(unittest.TestCase):
         sock.close()
         return response.decode('utf-8', errors='replace')
 
+    def assert_rejected(self, path):
+        """Injection is refused and the handler's own 500 still gets through
+
+        A rejection must not strand the connection: without a response the
+        client would hang until the keep-alive timeout, and asserting only
+        the absence of 'Injected' would pass on an empty response.
+        """
+        response = self.get_response(path)
+        self.assertNotIn('Injected', response)
+        self.assertIn('500', response)
+        self.assertIsInstance(self.last_error, uhttp_server.HttpError)
+        return response
+
     def test_header_value_with_crlf_rejected(self):
         """Header value containing CRLF must be rejected"""
-        response = self.get_response('/header-crlf')
-        self.assertNotIn('Injected', response)
+        self.assert_rejected('/header-crlf')
 
     def test_header_value_with_lf_rejected(self):
         """Header value containing bare LF must be rejected"""
-        response = self.get_response('/header-lf')
-        self.assertNotIn('Injected', response)
+        self.assert_rejected('/header-lf')
 
     def test_header_value_with_cr_rejected(self):
         """Header value containing bare CR must be rejected"""
-        response = self.get_response('/header-cr')
-        self.assertNotIn('Injected', response)
+        self.assert_rejected('/header-cr')
 
     def test_cookie_value_with_crlf_rejected(self):
         """Cookie value containing CRLF must be rejected"""
-        response = self.get_response('/cookie-crlf')
-        self.assertNotIn('Injected', response)
+        self.assert_rejected('/cookie-crlf')
 
     def test_cookie_key_with_crlf_rejected(self):
         """Cookie key containing CRLF must be rejected"""
-        response = self.get_response('/cookie-key-crlf')
-        self.assertNotIn('Injected', response)
+        self.assert_rejected('/cookie-key-crlf')
 
     def test_redirect_url_with_crlf_rejected(self):
         """Redirect URL containing CRLF must be rejected"""
-        response = self.get_response('/redirect-crlf')
-        self.assertNotIn('Injected', response)
+        self.assert_rejected('/redirect-crlf')
+
+    def test_multipart_header_with_crlf_rejected(self):
+        """A rejected streaming response must release the streaming flag too
+
+        A connection left marked as streaming is skipped by idle cleanup, so
+        it would never time out.
+        """
+        self.assert_rejected('/multipart-crlf')
+
+    def test_connection_survives_for_the_next_request(self):
+        """A rejected response must not poison the keep-alive connection"""
+        self.assert_rejected('/header-crlf')
+        response = self.get_response('/clean')
+        self.assertIn('200', response)
 
     def test_clean_headers_and_cookies_work(self):
         """Normal headers and cookies without CRLF must work fine"""

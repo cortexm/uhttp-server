@@ -1769,20 +1769,28 @@ class HttpConnection(_WsFrameMixin):
         # .get() tolerates custom/unknown status codes without KeyError
         parts = [f'{PROTOCOLS[-1]} {status} {STATUS_CODES.get(status, "")}']
 
-        if headers:
-            for key, val in headers.items():
-                self._check_header_value(key)
-                self._check_header_value(val)
-                parts.append(f'{key}: {val}')
-
-        if cookies:
-            for key, val in cookies.items():
-                self._check_header_value(key)
-                if val is None:
-                    val = '; Max-Age=0'
-                else:
+        try:
+            if headers:
+                for key, val in headers.items():
+                    self._check_header_value(key)
                     self._check_header_value(val)
-                parts.append(f'{SET_COOKIE}: {key}={val}')
+                    parts.append(f'{key}: {val}')
+
+            if cookies:
+                for key, val in cookies.items():
+                    self._check_header_value(key)
+                    if val is None:
+                        val = '; Max-Age=0'
+                    else:
+                        self._check_header_value(val)
+                    parts.append(f'{SET_COOKIE}: {key}={val}')
+        except HttpError:
+            # nothing went out yet, so release the claim _prepare_response made
+            # — otherwise the application cannot answer at all and the client
+            # hangs until the keep-alive timeout
+            self._response_started = False
+            self._is_streaming = False
+            raise
 
         parts.append('\r\n')
         return '\r\n'.join(parts)
