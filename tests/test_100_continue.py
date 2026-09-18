@@ -8,6 +8,7 @@ import time
 import threading
 from uhttp import server as uhttp_server
 from uhttp.server import EVENT_REQUEST, EVENT_HEADERS, EVENT_COMPLETE
+from tests.testutils import wait_until_listening
 
 
 class Test100ContinueNonEventMode(unittest.TestCase):
@@ -41,7 +42,7 @@ class Test100ContinueNonEventMode(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -183,7 +184,7 @@ class Test100ContinueEventMode(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -291,7 +292,7 @@ class Test100ContinueEventModeReject(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):

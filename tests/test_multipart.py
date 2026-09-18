@@ -26,7 +26,8 @@ class TestMultipart(unittest.TestCase):
         def run_server():
             try:
                 while cls.server:
-                    client = cls.server.wait(timeout=0.1)
+                    # the poll interval is what paces the sends below
+                    client = cls.server.wait(timeout=0.01)
 
                     if client:
                         if client.path == '/':
@@ -45,7 +46,7 @@ class TestMultipart(unittest.TestCase):
 
                     # Send frames to active multipart clients
                     for mc in list(cls.multipart_clients):
-                        if time.time() - mc['last_send'] > 0.1:  # Send every 100ms
+                        if time.time() - mc['last_send'] > 0.02:
                             mc['counter'] += 1
                             data = f"Frame {mc['counter']}\n"
 

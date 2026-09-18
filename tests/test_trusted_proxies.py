@@ -6,7 +6,7 @@ import time
 import threading
 import json
 from uhttp import server as uhttp_server
-from tests.testutils import wait_until_listening
+from tests.testutils import wait_for, wait_until_listening
 
 
 class TestTrustedProxiesDisabled(unittest.TestCase):
@@ -46,6 +46,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
             cls.server = None
 
     def send_request(self, request_bytes):
+        type(self).last_request = None
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2.0)
         sock.connect(('localhost', self.PORT))
@@ -68,8 +69,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
 
     def test_socket_address_always_returns_socket_ip(self):
@@ -79,8 +79,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertTrue(self.last_request['socket_address'].startswith('127.0.0.1:'))
 
     def test_remote_addresses_ignored_by_default(self):
@@ -90,8 +89,7 @@ class TestTrustedProxiesDisabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 10.0.0.1, 10.0.0.2\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
 
@@ -133,6 +131,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             cls.server = None
 
     def send_request(self, request_bytes):
+        type(self).last_request = None
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2.0)
         sock.connect(('localhost', self.PORT))
@@ -155,8 +154,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
     def test_untrusted_hop_wins_over_spoofed_prefix(self):
@@ -170,8 +168,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50, 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '10.0.0.1')
 
     def test_remote_addresses_returns_full_chain(self):
@@ -181,8 +178,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50, 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(
             self.last_request['remote_addresses'], ['203.0.113.50', '10.0.0.1'])
 
@@ -193,8 +189,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50, , \r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
         self.assertEqual(
             self.last_request['remote_addresses'], ['203.0.113.50'])
@@ -206,8 +201,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: ,\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
@@ -218,8 +212,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.9:51234\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.9')
 
     def test_bracketed_ipv6_chain_entry_is_unwrapped(self):
@@ -229,8 +222,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: [2001:db8::9]:443\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '2001:db8::9')
 
     def test_bare_ipv6_chain_entry_is_kept(self):
@@ -240,8 +232,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 2001:db8::9\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '2001:db8::9')
 
     def test_ipv4_mapped_chain_entry_is_normalized(self):
@@ -251,8 +242,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: ::ffff:203.0.113.50\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
     def test_no_forwarded_header_falls_back_to_socket(self):
@@ -261,8 +251,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"GET / HTTP/1.1\r\n"
             b"Host: localhost\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
@@ -273,8 +262,7 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertTrue(self.last_request['socket_address'].startswith('127.0.0.1:'))
 
 
@@ -317,6 +305,7 @@ class TestTrustedProxiesUntrustedSource(unittest.TestCase):
             cls.server = None
 
     def send_request(self, request_bytes):
+        type(self).last_request = None
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2.0)
         sock.connect(('localhost', self.PORT))
@@ -339,8 +328,7 @@ class TestTrustedProxiesUntrustedSource(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
@@ -448,6 +436,7 @@ class TestTrustedProxyChain(unittest.TestCase):
             cls.server = None
 
     def send_request(self, request_bytes):
+        type(self).last_request = None
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2.0)
         sock.connect(('localhost', self.PORT))
@@ -470,8 +459,7 @@ class TestTrustedProxyChain(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50, 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
     def test_spoofed_prefix_is_ignored(self):
@@ -481,8 +469,7 @@ class TestTrustedProxyChain(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 1.2.3.4, 203.0.113.50, 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
         self.assertEqual(
             self.last_request['remote_addresses'],
@@ -495,8 +482,7 @@ class TestTrustedProxyChain(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 203.0.113.50, 10.0.0.1:4711\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
     def test_all_hops_trusted_falls_back_to_nearest(self):
@@ -506,8 +492,7 @@ class TestTrustedProxyChain(unittest.TestCase):
             b"Host: localhost\r\n"
             b"X-Forwarded-For: 10.0.0.1\r\n"
             b"\r\n")
-        time.sleep(0.2)
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
 
 

@@ -8,7 +8,7 @@ import time
 import threading
 import json
 from uhttp import server as uhttp_server
-from tests.testutils import wait_until_listening
+from tests.testutils import wait_for, wait_until_listening
 
 
 class TestDataParsing(unittest.TestCase):
@@ -60,6 +60,7 @@ class TestDataParsing(unittest.TestCase):
 
     def send_request(self, request_bytes):
         """Helper to send request and return parsed JSON response"""
+        type(self).last_request = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)
@@ -93,54 +94,42 @@ class TestDataParsing(unittest.TestCase):
         """Test simple query string parsing"""
         request = b"GET /test?a=1&b=2&c=3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'a': '1', 'b': '2', 'c': '3'})
 
     def test_query_string_plus_to_space(self):
         """Test plus sign conversion to space"""
         request = b"GET /test?name=John+Doe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'name': 'John Doe'})
 
     def test_query_string_url_encoding(self):
         """Test URL percent encoding"""
         request = b"GET /test?email=test%40example.com HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'email': 'test@example.com'})
 
     def test_query_string_duplicate_keys(self):
         """Test duplicate query keys become list"""
         request = b"GET /test?list=1&list=2&list=3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'list': ['1', '2', '3']})
 
     def test_query_string_empty_value(self):
         """Test empty value with = sign"""
         request = b"GET /test?empty=&another=value HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'empty': '', 'another': 'value'})
 
     def test_query_string_no_value(self):
         """Test parameter without = sign (flag)"""
         request = b"GET /test?novalue HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'novalue': None})
 
     # JSON Parsing Tests
@@ -160,9 +149,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], data)
 
     def test_json_nested_object(self):
@@ -180,9 +167,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], data)
 
     def test_json_array(self):
@@ -200,9 +185,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], data)
 
     def test_json_unicode(self):
@@ -220,9 +203,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], data)
 
     def test_json_various_types(self):
@@ -240,9 +221,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], data)
 
     # Form Data Parsing Tests
@@ -261,9 +240,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], {'username': 'john', 'password': 'secret123'})
 
     def test_form_data_spaces(self):
@@ -280,9 +257,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], {'name': 'John Doe', 'city': 'New York'})
 
     def test_form_data_url_encoded(self):
@@ -299,9 +274,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], {'email': 'test@example.com', 'url': 'https://example.com'})
 
     def test_form_data_multiple_values(self):
@@ -318,9 +291,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], {'tags': ['python', 'http', 'server']})
 
     # Cookie Parsing Tests
@@ -335,9 +306,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['cookies'], {'session': 'abc123'})
 
     def test_cookie_multiple(self):
@@ -350,9 +319,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['cookies'], {'user': 'john', 'token': 'xyz789'})
 
     def test_cookie_multiple_values(self):
@@ -365,9 +332,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['cookies'], {'id': '123', 'name': 'TestUser'})
 
     # Binary Data Tests
@@ -386,9 +351,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['data'], binary_data)
 
     # Empty POST Test
@@ -398,9 +361,7 @@ class TestDataParsing(unittest.TestCase):
         request = b"POST /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertIn(self.last_request['data'], [None, b''])
 
     # Combined Query and Body Test
@@ -420,9 +381,7 @@ class TestDataParsing(unittest.TestCase):
         )
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['query'], {'action': 'create', 'debug': 'true'})
         self.assertEqual(self.last_request['data'], {'name': 'Test', 'value': 123})
 
@@ -433,9 +392,7 @@ class TestDataParsing(unittest.TestCase):
         request = b"GET /api/users/123 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['path'], '/api/users/123')
 
     def test_path_with_extension(self):
@@ -443,9 +400,7 @@ class TestDataParsing(unittest.TestCase):
         request = b"GET /files/document.pdf HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['path'], '/files/document.pdf')
 
     def test_path_url_encoded_spaces(self):
@@ -453,9 +408,7 @@ class TestDataParsing(unittest.TestCase):
         request = b"GET /path%20with%20spaces HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['path'], '/path with spaces')
 
     def test_path_special_characters(self):
@@ -463,9 +416,7 @@ class TestDataParsing(unittest.TestCase):
         request = b"GET /special/%21%40%23%24 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
         self.send_request(request)
-        time.sleep(0.1)
-
-        self.assertIsNotNone(self.last_request)
+        wait_for(lambda: self.last_request)
         self.assertEqual(self.last_request['path'], '/special/!@#$')
 
 

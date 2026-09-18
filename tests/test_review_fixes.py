@@ -220,7 +220,9 @@ class TestObsFold(unittest.TestCase):
             sock.sendall(
                 b"GET / HTTP/1.1\r\nHost: localhost\r\n"
                 b"X-Long: first\r\n  x-smuggled: yes\r\n\r\n")
-            drive(server)
+            # no client is ever returned for a rejected request, so drive()
+            # would otherwise run out its full attempt budget
+            drive(server, attempts=5, timeout=0.02)
             sock.settimeout(1)
             self.assertIn(b'400', sock.recv(4096))
         finally:

@@ -12,6 +12,7 @@ from uhttp import server as uhttp_server
 from uhttp.server import (
     EVENT_REQUEST, EVENT_HEADERS, EVENT_DATA, EVENT_COMPLETE, EVENT_ERROR
 )
+from tests.testutils import wait_for, wait_until_listening
 
 
 class TestEventModeBasic(unittest.TestCase):
@@ -74,7 +75,7 @@ class TestEventModeBasic(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -179,7 +180,7 @@ class TestEventModeBasic(unittest.TestCase):
 
             # Send headers first, then body separately to force EVENT_HEADERS
             sock.send(headers)
-            time.sleep(0.2)
+            wait_for(lambda: self.events_received)
             sock.send(body)
 
             response = b''
@@ -252,7 +253,7 @@ class TestEventModeStreaming(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -283,14 +284,16 @@ class TestEventModeStreaming(unittest.TestCase):
                 f"\r\n"
             ).encode()
             sock.send(headers)
-            time.sleep(0.1)
+            # EVENT_HEADERS must arrive before any body byte does
+            wait_for(lambda: any(e[0] == 'headers' for e in self.received_data))
 
-            # Send body in chunks
+            # Send body in chunks, each one its own EVENT_DATA
             body = b'X' * body_size
             chunk_size = 1000
             for i in range(0, len(body), chunk_size):
+                seen = len(self.received_data)
                 sock.send(body[i:i+chunk_size])
-                time.sleep(0.05)
+                wait_for(lambda: len(self.received_data) > seen)
 
             response = b''
             try:
@@ -365,7 +368,7 @@ class TestEventModeFileUpload(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -402,7 +405,8 @@ class TestEventModeFileUpload(unittest.TestCase):
                 f"\r\n"
             ).encode()
             sock.send(headers)
-            time.sleep(0.1)
+            # EVENT_HEADERS opens the upload file before the body arrives
+            wait_for(lambda: self.upload_path)
 
             # Send body
             body = b'Y' * body_size
@@ -461,7 +465,7 @@ class TestEventModeBackwardsCompatibility(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -513,10 +517,14 @@ class TestEventModeDisconnect(unittest.TestCase):
     PORT = 9968
 
     def _drain(self, server, ticks=20):
-        """Return the events emitted over `ticks` loop passes"""
+        """Return the events emitted over `ticks` loop passes
+
+        A spin emits thousands of events per second, so the tick only has to
+        be long enough for a real event to arrive, not to prove a pause.
+        """
         events = []
         for _ in range(ticks):
-            client = server.wait(timeout=0.05)
+            client = server.wait(timeout=0.02)
             if client:
                 events.append(client.event)
         return events
@@ -658,7 +666,7 @@ class TestEventModeContext(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):

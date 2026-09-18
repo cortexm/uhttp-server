@@ -7,7 +7,7 @@ import socket
 import time
 import threading
 from uhttp import server as uhttp_server
-from tests.testutils import wait_until_listening
+from tests.testutils import wait_for, wait_until_listening
 
 
 class TestConcurrentConnections(unittest.TestCase):
@@ -35,7 +35,7 @@ class TestConcurrentConnections(unittest.TestCase):
                             req_num = cls.request_count
 
                         # Simulate some processing time
-                        time.sleep(0.05)
+                        time.sleep(0.01)
 
                         client.respond({
                             'request_number': req_num,
@@ -113,12 +113,9 @@ class TestConcurrentConnections(unittest.TestCase):
         for t in threads:
             t.join()
 
-        time.sleep(0.5)
-
         expected_requests = num_clients * requests_per_client
-        actual_requests = self.request_count - initial_count
-
-        self.assertEqual(actual_requests, expected_requests)
+        wait_for(
+            lambda: self.request_count - initial_count == expected_requests)
 
     def test_rapid_connections(self):
         """Test rapid connection and disconnection (10 quick sequential connections)"""
@@ -148,8 +145,6 @@ class TestConcurrentConnections(unittest.TestCase):
 
             except Exception:
                 pass
-
-        time.sleep(0.3)
 
         self.assertEqual(successful, num_connections)
 
@@ -190,8 +185,6 @@ class TestConcurrentConnections(unittest.TestCase):
         for sock in sockets:
             sock.close()
 
-        time.sleep(0.5)
-
         successful = sum(1 for r in responses if r and b"200 OK" in r)
         timeouts = sum(1 for r in responses if r and b"408" in r)
 
@@ -216,8 +209,8 @@ class TestConcurrentConnections(unittest.TestCase):
         )
         sock.sendall(headers)
 
-        # Wait before sending body
-        time.sleep(0.5)
+        # Wait before sending body, well within request_timeout
+        time.sleep(0.1)
 
         # Send body slowly
         body = b'{"slow_client":true}'

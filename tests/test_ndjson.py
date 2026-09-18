@@ -26,7 +26,8 @@ class TestNDJSON(unittest.TestCase):
         def run_server():
             try:
                 while cls.server:
-                    client = cls.server.wait(timeout=0.1)
+                    # the poll interval is what paces the sends below
+                    client = cls.server.wait(timeout=0.01)
 
                     if client:
                         if client.path == '/stream':
@@ -58,7 +59,7 @@ class TestNDJSON(unittest.TestCase):
                             client.respond("Not found", status=404)
 
                     for sc in list(cls.nd_clients):
-                        if time.time() - sc['last_send'] > 0.05:
+                        if time.time() - sc['last_send'] > 0.02:
                             sc['counter'] += 1
                             mode = sc['mode']
 

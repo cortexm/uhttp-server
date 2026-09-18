@@ -62,7 +62,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         Test: Content-Length is 10 but actual data is 30 bytes
         Expected: Server rejects with 400 error (pipelining not supported)
         """
-        time.sleep(0.3)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(('localhost', self.PORT))
 
@@ -81,8 +80,8 @@ class TestContentLengthSecurity(unittest.TestCase):
         response = sock.recv(4096).decode()
         sock.close()
 
-        time.sleep(0.2)
-
+        # The handler records the request before it responds, so the 400 we
+        # just read already settles whether anything was recorded
         # Server should reject with 400 error due to extra data
         self.assertIn("400", response)
         self.assertIsNone(self.last_request_data)
@@ -94,7 +93,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         """
         initial_count = self.request_count
 
-        time.sleep(0.3)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(('localhost', self.PORT))
 
@@ -119,7 +117,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         response1 = sock.recv(4096).decode()
 
         sock.close()
-        time.sleep(0.3)
 
         # Server should reject with 400 error, no request processed
         self.assertEqual(self.request_count - initial_count, 0)
@@ -130,7 +127,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         Test: Content-Length with invalid value
         Expected: Server returns 400 Bad Request
         """
-        time.sleep(0.3)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(('localhost', self.PORT))
 
@@ -155,7 +151,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         """
         initial_count = self.request_count
 
-        time.sleep(0.3)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(('localhost', self.PORT))
 
@@ -179,7 +174,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         Test: Multiple Content-Length headers (potential smuggling attack)
         Expected: Server should handle this safely
         """
-        time.sleep(0.3)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(('localhost', self.PORT))
 
@@ -198,8 +192,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         response = sock.recv(4096).decode()
         sock.close()
 
-        time.sleep(0.2)
-
         # RFC 7230: duplicate Content-Length must be rejected
         self.assertIn("400", response)
 
@@ -208,7 +200,6 @@ class TestContentLengthSecurity(unittest.TestCase):
         Test: Content-Length says 100 but client only sends 20 bytes
         Expected: Server waits for more data or times out
         """
-        time.sleep(0.3)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(('localhost', self.PORT))
 
@@ -226,8 +217,10 @@ class TestContentLengthSecurity(unittest.TestCase):
         # Only send 20 bytes instead of promised 100
         sock.sendall(b"Only 20 bytes here!!")
 
-        # Set short timeout to see if server responds immediately (it shouldn't)
-        sock.settimeout(1.0)
+        # Set short timeout to see if server responds immediately (it
+        # shouldn't). A premature response would come within milliseconds,
+        # so the window only has to be long enough to notice one.
+        sock.settimeout(0.3)
         try:
             response = sock.recv(4096)
             # If we get immediate response, server didn't wait for complete data

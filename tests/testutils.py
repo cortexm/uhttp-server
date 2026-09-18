@@ -22,6 +22,24 @@ def wait_until_listening(port, host='localhost', timeout=5.0):
             time.sleep(0.01)
 
 
+def wait_for(predicate, timeout=2.0, interval=0.002):
+    """Block until predicate() is true and return its value
+
+    Replaces a fixed sleep that waits for the server thread to record
+    something: it returns as soon as the state is there instead of paying
+    the constant every time, and it fails loudly rather than leaving the
+    assertion to work on state that never arrived.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for state")
+        time.sleep(interval)
+
+
 def content_length(head):
     """Return the content-length of a response head, or None"""
     for line in head.decode('latin-1').split('\r\n')[1:]:

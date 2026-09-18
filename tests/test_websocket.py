@@ -18,6 +18,7 @@ from uhttp.server import (
     WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_CONTINUATION,
     _WS_MAGIC, _ws_build_frame,
 )
+from tests.testutils import wait_for, wait_until_listening
 
 
 def build_masked_frame(opcode, payload, fin=True, mask=b'\x37\xfa\x21\x3d'):
@@ -199,7 +200,7 @@ class TestWebSocketEventMode(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -278,9 +279,7 @@ class TestWebSocketEventMode(unittest.TestCase):
             fin, opcode, payload = recv_frame(sock)
             self.assertEqual(opcode, WS_OPCODE_PONG)
             self.assertEqual(payload, ping_data)
-            time.sleep(0.2)
-            self.assertTrue(
-                any(e['event'] == 'ping' for e in self.ws_events))
+            wait_for(lambda: any(e['event'] == 'ping' for e in self.ws_events))
         finally:
             sock.close()
 
@@ -293,9 +292,7 @@ class TestWebSocketEventMode(unittest.TestCase):
                 WS_OPCODE_CLOSE, close_payload))
             fin, opcode, payload = recv_frame(sock)
             self.assertEqual(opcode, WS_OPCODE_CLOSE)
-            time.sleep(0.2)
-            self.assertTrue(
-                any(e['event'] == 'close' for e in self.ws_events))
+            wait_for(lambda: any(e['event'] == 'close' for e in self.ws_events))
         finally:
             sock.close()
 
@@ -305,9 +302,8 @@ class TestWebSocketEventMode(unittest.TestCase):
         try:
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'small'))
             recv_frame(sock)
-            time.sleep(0.2)
-            self.assertTrue(
-                any(e['event'] == 'message' for e in self.ws_events))
+            wait_for(
+                lambda: any(e['event'] == 'message' for e in self.ws_events))
         finally:
             sock.close()
 
@@ -317,9 +313,8 @@ class TestWebSocketEventMode(unittest.TestCase):
         try:
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'čau'))
             recv_frame(sock)
-            time.sleep(0.2)
-            msg_events = [
-                e for e in self.ws_events if e['event'] == 'message']
+            msg_events = wait_for(
+                lambda: [e for e in self.ws_events if e['event'] == 'message'])
             self.assertEqual(len(msg_events), 1)
             self.assertIsInstance(msg_events[0]['data'], bytes)
             self.assertEqual(msg_events[0]['data'], 'čau'.encode('utf-8'))
@@ -333,9 +328,8 @@ class TestWebSocketEventMode(unittest.TestCase):
             sock.sendall(build_masked_frame(
                 WS_OPCODE_BINARY, b'\x00\x01\x02'))
             recv_frame(sock)
-            time.sleep(0.2)
-            msg_events = [
-                e for e in self.ws_events if e['event'] == 'message']
+            msg_events = wait_for(
+                lambda: [e for e in self.ws_events if e['event'] == 'message'])
             self.assertEqual(len(msg_events), 1)
             self.assertIsInstance(msg_events[0]['data'], bytes)
         finally:
@@ -364,7 +358,7 @@ class TestWebSocketEventMode(unittest.TestCase):
             # Send a message to get a reference to the connection
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'init'))
             recv_frame(sock)
-            time.sleep(0.3)
+            wait_for(lambda: self.ws_connections)
 
             # Schedule ping in server thread to avoid race conditions
             for conn in list(self.ws_connections.values()):
@@ -385,7 +379,7 @@ class TestWebSocketEventMode(unittest.TestCase):
         try:
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'init'))
             recv_frame(sock)
-            time.sleep(0.3)
+            wait_for(lambda: self.ws_connections)
 
             for conn in list(self.ws_connections.values()):
                 self.pending_actions.append(
@@ -404,14 +398,13 @@ class TestWebSocketEventMode(unittest.TestCase):
         sock = self._connect_ws()
         sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'init'))
         recv_frame(sock)
-        time.sleep(0.2)
+        wait_for(lambda: any(e['event'] == 'message' for e in self.ws_events))
 
         self.ws_events.clear()
         sock.close()
-        time.sleep(1)
         # Server should detect disconnect and fire close event
-        close_events = [
-            e for e in self.ws_events if e['event'] == 'close']
+        close_events = wait_for(
+            lambda: [e for e in self.ws_events if e['event'] == 'close'])
         self.assertEqual(len(close_events), 1)
         self.assertIsNone(close_events[0]['data'])
 
@@ -586,7 +579,7 @@ class TestWebSocketNonEventMode(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -761,7 +754,7 @@ class TestWebSocketLargeMessages(unittest.TestCase):
 
         cls.server_thread = threading.Thread(target=run_server, daemon=True)
         cls.server_thread.start()
-        time.sleep(0.3)
+        wait_until_listening(cls.PORT)
 
     @classmethod
     def tearDownClass(cls):
@@ -786,10 +779,9 @@ class TestWebSocketLargeMessages(unittest.TestCase):
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'x' * 50))
             fin, opcode, payload = recv_frame(sock)
             self.assertIn(b'ok:50', payload)
-            time.sleep(0.2)
-            events = [
-                e for e in self.ws_events
-                if e['event'] == EVENT_WS_MESSAGE]
+            events = wait_for(
+                lambda: [e for e in self.ws_events
+                         if e['event'] == EVENT_WS_MESSAGE])
             self.assertEqual(len(events), 1)
         finally:
             sock.close()
@@ -802,7 +794,7 @@ class TestWebSocketLargeMessages(unittest.TestCase):
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'x' * 500))
             fin, opcode, payload = recv_frame(sock)
             self.assertIn(b'chunked:500', payload)
-            time.sleep(0.2)
+            wait_for(lambda: sum(e['len'] for e in self.ws_events) == 500)
             event_types = [e['event'] for e in self.ws_events]
             self.assertIn(EVENT_WS_CHUNK_FIRST, event_types)
             self.assertIn(EVENT_WS_CHUNK_LAST, event_types)
@@ -827,9 +819,7 @@ class TestWebSocketLargeMessages(unittest.TestCase):
                 WS_OPCODE_CONTINUATION, 'c' * 100, fin=True))
             fin, opcode, payload = recv_frame(sock)
             self.assertIn(b'chunked:300', payload)
-            time.sleep(0.2)
-            total = sum(e['len'] for e in self.ws_events)
-            self.assertEqual(total, 300)
+            wait_for(lambda: sum(e['len'] for e in self.ws_events) == 300)
         finally:
             sock.close()
 
@@ -840,10 +830,9 @@ class TestWebSocketLargeMessages(unittest.TestCase):
             sock.sendall(build_masked_frame(WS_OPCODE_TEXT, 'x' * 100))
             fin, opcode, payload = recv_frame(sock)
             self.assertIn(b'ok:100', payload)
-            time.sleep(0.2)
-            events = [
-                e for e in self.ws_events
-                if e['event'] == EVENT_WS_MESSAGE]
+            events = wait_for(
+                lambda: [e for e in self.ws_events
+                         if e['event'] == EVENT_WS_MESSAGE])
             self.assertEqual(len(events), 1)
         finally:
             sock.close()
