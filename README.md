@@ -512,7 +512,7 @@ Parameters:
 
 **`remote_addresses(self)`**
 
-- The `X-Forwarded-For` chain as a list of IP strings, client first and last proxy last — the same shape as Werkzeug's `access_route` or Express's `req.ips`. Falls back to `[socket_ip]` when the header is absent or the socket peer is not a trusted proxy. Entries left of `remote_address` are **not** trustworthy — use `remote_address` for anything that makes a decision.
+- The `X-Forwarded-For` chain as a list of bare IP strings (an entry written as `ip:port`, `[ipv6]` or `[ipv6]:port` is reduced to the IP), client first and last proxy last — the same shape as Werkzeug's `access_route` or Express's `req.ips`. Falls back to `[socket_ip]` when the header is absent or the socket peer is not a trusted proxy. Entries left of `remote_address` are **not** trustworthy — use `remote_address` for anything that makes a decision.
 
 **`method(self)`**
 
@@ -1139,6 +1139,12 @@ spoof-proof. Taking the leftmost entry instead would be safe only with
 `proxy_set_header X-Forwarded-For $remote_addr;` (which overwrites the header)
 and wide open with the far more common `$proxy_add_x_forwarded_for` (which
 appends to it).
+
+Chain entries are reduced to a bare IP, so a proxy that writes
+`$remote_addr:$remote_port` (or an RFC 3986 `[2001:db8::9]:443`) still matches
+`trusted_proxies` and still keys an allowlist. An unbracketed IPv6 keeps all
+of its groups — it always holds at least two colons, so a single colon can
+only be a port separator.
 
 **List every proxy in the chain**, not just the one the server talks to. An
 intermediate hop missing from `trusted_proxies` is where the walk stops, and

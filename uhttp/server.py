@@ -310,6 +310,19 @@ def unmap_ipv4(address):
     return address
 
 
+def parse_ip(address):
+    """Return the bare IP of an address, dropping brackets and port
+
+    Accepts `ip`, `ipv4:port`, `[ipv6]` and `[ipv6]:port`. Every IPv6 holds
+    at least two colons, so a single colon can only be a port separator.
+    """
+    if address.startswith('['):
+        address = address[1:].split(']', 1)[0]
+    elif address.count(':') == 1:
+        address = address.split(':', 1)[0]
+    return unmap_ipv4(address)
+
+
 def parse_header_line(line):
     """Parse header line to key and value"""
     try:
@@ -868,10 +881,11 @@ class HttpConnection(_WsFrameMixin):
         if proxies and self._socket_ip in proxies:
             forwarded = self.headers_get_attribute('x-forwarded-for')
             if forwarded:
-                addresses = [
-                    unmap_ipv4(addr.strip())
-                    for addr in forwarded.split(',') if addr.strip()
-                ]
+                addresses = []
+                for address in forwarded.split(','):
+                    address = parse_ip(address.strip())
+                    if address:
+                        addresses.append(address)
                 if addresses:
                     return addresses
         return [self._socket_ip]

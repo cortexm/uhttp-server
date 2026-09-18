@@ -210,6 +210,39 @@ class TestTrustedProxiesEnabled(unittest.TestCase):
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
 
+    def test_chain_entry_with_port_loses_the_port(self):
+        """Some proxies write $remote_addr:$remote_port into the header"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 203.0.113.9:51234\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '203.0.113.9')
+
+    def test_bracketed_ipv6_chain_entry_is_unwrapped(self):
+        """RFC 3986 form, with and without a port"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: [2001:db8::9]:443\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '2001:db8::9')
+
+    def test_bare_ipv6_chain_entry_is_kept(self):
+        """An unbracketed IPv6 must not lose its last group to port stripping"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 2001:db8::9\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '2001:db8::9')
+
     def test_ipv4_mapped_chain_entry_is_normalized(self):
         """An IPv4-mapped entry must match trusted_proxies and read plainly"""
         self.send_request(
@@ -309,6 +342,26 @@ class TestTrustedProxiesUntrustedSource(unittest.TestCase):
         self.assertIsNotNone(self.last_request)
         self.assertEqual(self.last_request['remote_address'], '127.0.0.1')
         self.assertEqual(self.last_request['remote_addresses'], ['127.0.0.1'])
+
+
+class TestParseIp(unittest.TestCase):
+    """Chain entries carrying a port or brackets must reduce to a bare IP"""
+
+    def test_forms(self):
+        cases = (
+            ('203.0.113.9', '203.0.113.9'),
+            ('203.0.113.9:51234', '203.0.113.9'),
+            ('2001:db8::9', '2001:db8::9'),
+            ('[2001:db8::9]', '2001:db8::9'),
+            ('[2001:db8::9]:443', '2001:db8::9'),
+            ('::1', '::1'),
+            ('::ffff:192.0.2.1', '192.0.2.1'),
+            ('[::ffff:192.0.2.1]:80', '192.0.2.1'),
+            ('unknown', 'unknown'),
+            ('[', ''),
+        )
+        for value, expected in cases:
+            self.assertEqual(uhttp_server.parse_ip(value), expected, value)
 
 
 class TestTrustedProxiesValidation(unittest.TestCase):
@@ -416,6 +469,17 @@ class TestTrustedProxyChain(unittest.TestCase):
         self.assertEqual(
             self.last_request['remote_addresses'],
             ['1.2.3.4', '203.0.113.50', '10.0.0.1'])
+
+    def test_trusted_hop_written_with_a_port_still_matches(self):
+        """A port on a trusted hop must not stop the walk on that proxy"""
+        self.send_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Forwarded-For: 203.0.113.50, 10.0.0.1:4711\r\n"
+            b"\r\n")
+        time.sleep(0.2)
+        self.assertIsNotNone(self.last_request)
+        self.assertEqual(self.last_request['remote_address'], '203.0.113.50')
 
     def test_all_hops_trusted_falls_back_to_nearest(self):
         """With no untrusted hop the nearest one is returned, never nothing"""
