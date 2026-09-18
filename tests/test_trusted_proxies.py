@@ -374,6 +374,23 @@ class TestTrustedProxiesValidation(unittest.TestCase):
             uhttp_server.HttpServer(
                 port=self.PORT, trusted_proxies='192.168.1.10')
 
+    def test_cidr_is_rejected(self):
+        """A range would never match, and it would fail silently"""
+        with self.assertRaises(ValueError):
+            uhttp_server.HttpServer(
+                port=self.PORT, trusted_proxies=['10.0.0.0/8'])
+
+    def test_config_entries_are_normalized(self):
+        """Config and chain must be compared in the same form"""
+        server = uhttp_server.HttpServer(
+            port=self.PORT,
+            trusted_proxies=['[::ffff:10.0.0.1]', '192.0.2.1:8080'])
+        try:
+            self.assertEqual(
+                server._trusted_proxies, {'10.0.0.1', '192.0.2.1'})
+        finally:
+            server.close()
+
     def test_any_iterable_is_accepted(self):
         for proxies in (
                 ['127.0.0.1'], ('127.0.0.1',), {'127.0.0.1'}):

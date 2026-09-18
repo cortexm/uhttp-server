@@ -2312,7 +2312,14 @@ class HttpServer():
             # '92.168.1.1' in '192.168.1.10' is True, trust would be forged
             raise ValueError(
                 "trusted_proxies must be a list of IP addresses, not a str")
-        self._trusted_proxies = set(proxies) if proxies else None
+        if proxies:
+            for proxy in proxies:
+                if '/' in proxy:
+                    raise ValueError(
+                        "trusted_proxies matches exact IP addresses, CIDR "
+                        f"is not supported: {proxy}")
+            proxies = {parse_ip(proxy) for proxy in proxies}
+        self._trusted_proxies = proxies or None
         # Shared selector may be passed in; an owned one is closed in close().
         selector = kwargs.pop('selector', None)
         self._owns_selector = selector is None

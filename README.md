@@ -456,7 +456,7 @@ Parameters:
   - `max_ws_message_length` - Maximum WebSocket message size before chunking (default: 64KB)
   - `file_chunk_size` - Chunk size in bytes for streaming file responses (default: 4KB)
   - `listen` - Listening socket backlog (default: 8)
-  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `X-Forwarded-For` is honoured for connections from these IPs; when not set it is ignored entirely. List **every** proxy in the chain, not just the one the server talks to — see [Behind a reverse proxy](#behind-a-reverse-proxy). A plain string raises `ValueError`: `'10.0.0.1' in '110.0.0.10'` is True, so a string would match by substring and forge trust.
+  - `trusted_proxies` - List of trusted proxy IP addresses (default: None). When set, `X-Forwarded-For` is honoured for connections from these IPs; when not set it is ignored entirely. List **every** proxy in the chain, not just the one the server talks to — see [Behind a reverse proxy](#behind-a-reverse-proxy). Matching is by **exact IP** — CIDR ranges are not supported and a `/` in an entry raises `ValueError` rather than never matching. A plain string also raises `ValueError`: `'10.0.0.1' in '110.0.0.10'` is True, so a string would match by substring and forge trust.
   - `selector` - A `selectors.BaseSelector` to register sockets in (default: a `DefaultSelector` the server owns and closes). Pass the same instance to several servers (and register your own sockets in it) to drive them from one loop.
 
 #### Properties:
@@ -1145,6 +1145,12 @@ Chain entries are reduced to a bare IP, so a proxy that writes
 `trusted_proxies` and still keys an allowlist. An unbracketed IPv6 keeps all
 of its groups — it always holds at least two colons, so a single colon can
 only be a port separator.
+
+Entries are matched as exact IP addresses; there is no CIDR support, so list
+the proxy addresses one by one (a `/` in an entry raises `ValueError` at
+startup instead of quietly never matching). Config entries go through the same
+normalization as the chain, so `'[::ffff:10.0.0.1]'` and `'10.0.0.1'` are the
+same proxy.
 
 **List every proxy in the chain**, not just the one the server talks to. An
 intermediate hop missing from `trusted_proxies` is where the walk stops, and
